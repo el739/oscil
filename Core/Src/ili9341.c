@@ -230,10 +230,11 @@ static void ILI9341_DrawPixelBlock(uint16_t x, uint16_t y, uint8_t size,
 void ILI9341_DrawChar(uint16_t x, uint16_t y, char c,
                       uint16_t color, uint16_t bg, uint8_t size)
 {
-    if (c < 0x20 || c > 0x7E) {
-        c = '?';
+    uint8_t uc = (uint8_t)c;
+    if (uc < 0x20 || uc > 0x7F) {
+        uc = '?';
     }
-    const uint8_t *glyph = &font5x7[(c - 0x20) * 5];
+    const uint8_t *glyph = &font5x7[uc * 5];
     for (uint8_t col = 0; col < 5; col++) {
         uint8_t line = glyph[col];
         for (uint8_t row = 0; row < 8; row++) {
