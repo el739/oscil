@@ -59,6 +59,7 @@ volatile uint8_t scope_frame_ready = 0;
 // 记录上一帧每个 x 的竖线范围 [y_min, y_max]
 uint16_t last_y_min[ILI9341_WIDTH];
 uint16_t last_y_max[ILI9341_WIDTH];
+static uint16_t scope_column_buf[ILI9341_HEIGHT];
 uint8_t first_draw = 1;
 /* USER CODE END PV */
 
@@ -68,6 +69,8 @@ void SystemClock_Config(void);
 void Scope_DrawGrid(void);
 void Scope_DrawWaveform(uint16_t *buf, uint16_t len);
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax);
+static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
+static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color);
 static uint32_t Scope_AdcToMillivolt(uint16_t sample);
 /* USER CODE END PFP */
 
@@ -123,6 +126,43 @@ static uint16_t Scope_BackgroundColor(uint16_t x, uint16_t y)
     } else {
         return ILI9341_BLACK;  // 背景
     }
+}
+
+static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1)
+{
+    if (x >= ILI9341_WIDTH) return;
+    if (y0 > y1) {
+        uint16_t tmp = y0;
+        y0 = y1;
+        y1 = tmp;
+    }
+    if (y0 >= ILI9341_HEIGHT) return;
+    if (y1 >= ILI9341_HEIGHT) {
+        y1 = ILI9341_HEIGHT - 1;
+    }
+    uint16_t span = y1 - y0 + 1;
+    if (span == 0) return;
+    for (uint16_t i = 0; i < span; i++) {
+        scope_column_buf[i] = Scope_BackgroundColor(x, y0 + i);
+    }
+    ILI9341_DrawPixels(x, y0, scope_column_buf, span);
+}
+
+static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color)
+{
+    if (x >= ILI9341_WIDTH) return;
+    if (y0 > y1) {
+        uint16_t tmp = y0;
+        y0 = y1;
+        y1 = tmp;
+    }
+    if (y0 >= ILI9341_HEIGHT) return;
+    if (y1 >= ILI9341_HEIGHT) {
+        y1 = ILI9341_HEIGHT - 1;
+    }
+    uint16_t span = y1 - y0 + 1;
+    if (span == 0) return;
+    ILI9341_DrawColorSpan(x, y0, span, color);
 }
 // 画背景网格
 void Scope_DrawGrid(void)
@@ -186,19 +226,7 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 
         // 3.1 擦掉上一帧在这个 x 上画过的竖线
         if (!first_draw) {
-            uint16_t ymin_old = last_y_min[x];
-            uint16_t ymax_old = last_y_max[x];
-            if (ymin_old > ymax_old) {
-                uint16_t tmp = ymin_old;
-                ymin_old = ymax_old;
-                ymax_old = tmp;
-            }
-            if (ymax_old >= ILI9341_HEIGHT) ymax_old = ILI9341_HEIGHT - 1;
-
-            for (uint16_t yy = ymin_old; yy <= ymax_old; yy++) {
-                uint16_t bg = Scope_BackgroundColor(x, yy);
-                ILI9341_DrawPixel(x, yy, bg);
-            }
+            Scope_EraseColumn(x, last_y_min[x], last_y_max[x]);
         }
 
         // 3.2 计算这一帧在这个 x 上的新竖线范围
@@ -210,9 +238,7 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         if (ymax_new >= ILI9341_HEIGHT) ymax_new = ILI9341_HEIGHT - 1;
 
         // 3.3 画新竖线
-        for (uint16_t yy = ymin_new; yy <= ymax_new; yy++) {
-            ILI9341_DrawPixel(x, yy, ILI9341_YELLOW);
-        }
+        Scope_DrawColumn(x, ymin_new, ymax_new, ILI9341_YELLOW);
 
         // 3.4 更新记录
         last_y_min[x] = ymin_new;

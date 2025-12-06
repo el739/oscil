@@ -43,6 +43,8 @@ void ILI9341_FillScreen(uint16_t color);
 void ILI9341_FillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color);
 void ILI9341_DrawPixel(uint16_t x, uint16_t y, uint16_t color);
 void ILI9341_DrawHLine(uint16_t x, uint16_t y, uint16_t w, uint16_t color);
+void ILI9341_DrawPixels(uint16_t x, uint16_t y, const uint16_t *colors, uint16_t count);
+void ILI9341_DrawColorSpan(uint16_t x, uint16_t y, uint16_t length, uint16_t color);
 void ILI9341_DrawChar(uint16_t x, uint16_t y, char c,
                       uint16_t color, uint16_t bg, uint8_t size);
 void ILI9341_DrawString(uint16_t x, uint16_t y, const char *str,

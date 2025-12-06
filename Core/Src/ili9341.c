@@ -7,6 +7,8 @@
 // ili9341.c
 #include "ili9341.h"
 
+#define ILI9341_STREAM_CHUNK   64U  // number of pixels per SPI burst when streaming
+
 static uint16_t _width = ILI9341_WIDTH;
 static uint16_t _height = ILI9341_HEIGHT;
 
@@ -141,6 +143,68 @@ void ILI9341_FillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
     while (pixels--) {
         uint8_t buf[2] = { hi, lo };
         HAL_SPI_Transmit(&hspi1, buf, 2, HAL_MAX_DELAY);
+    }
+    LCD_CS_HIGH();
+}
+
+void ILI9341_DrawPixels(uint16_t x, uint16_t y, const uint16_t *colors, uint16_t count)
+{
+    if (colors == NULL || count == 0) return;
+    if (x >= _width || y >= _height) return;
+    if (y + count > _height) {
+        count = _height - y;
+    }
+    if (count == 0) return;
+
+    ILI9341_SetAddressWindow(x, y, x, y + count - 1);
+
+    LCD_DC_HIGH();
+    LCD_CS_LOW();
+    uint8_t txbuf[ILI9341_STREAM_CHUNK * 2U];
+    uint16_t sent = 0;
+    while (sent < count) {
+        uint16_t chunk = count - sent;
+        if (chunk > ILI9341_STREAM_CHUNK) {
+            chunk = ILI9341_STREAM_CHUNK;
+        }
+        for (uint16_t i = 0; i < chunk; i++) {
+            uint16_t color = colors[sent + i];
+            txbuf[2U * i]     = (uint8_t)(color >> 8);
+            txbuf[2U * i + 1] = (uint8_t)(color & 0xFF);
+        }
+        HAL_SPI_Transmit(&hspi1, txbuf, chunk * 2U, HAL_MAX_DELAY);
+        sent += chunk;
+    }
+    LCD_CS_HIGH();
+}
+
+void ILI9341_DrawColorSpan(uint16_t x, uint16_t y, uint16_t length, uint16_t color)
+{
+    if (length == 0) return;
+    if (x >= _width || y >= _height) return;
+    if (y + length > _height) {
+        length = _height - y;
+    }
+    if (length == 0) return;
+
+    ILI9341_SetAddressWindow(x, y, x, y + length - 1);
+    LCD_DC_HIGH();
+    LCD_CS_LOW();
+
+    uint8_t hi = (uint8_t)(color >> 8);
+    uint8_t lo = (uint8_t)(color & 0xFF);
+    uint8_t txbuf[ILI9341_STREAM_CHUNK * 2U];
+    while (length > 0) {
+        uint16_t chunk = length;
+        if (chunk > ILI9341_STREAM_CHUNK) {
+            chunk = ILI9341_STREAM_CHUNK;
+        }
+        for (uint16_t i = 0; i < chunk; i++) {
+            txbuf[2U * i]     = hi;
+            txbuf[2U * i + 1] = lo;
+        }
+        HAL_SPI_Transmit(&hspi1, txbuf, chunk * 2U, HAL_MAX_DELAY);
+        length -= chunk;
     }
     LCD_CS_HIGH();
 }
