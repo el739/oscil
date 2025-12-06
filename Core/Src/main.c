@@ -86,6 +86,7 @@ uint16_t last_y_min[ILI9341_WIDTH];
 uint16_t last_y_max[ILI9341_WIDTH];
 static uint16_t scope_column_buf[ILI9341_HEIGHT];
 uint8_t first_draw = 1;
+static uint32_t scope_sample_rate_hz = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,10 +94,16 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 void Scope_DrawGrid(void);
 void Scope_DrawWaveform(uint16_t *buf, uint16_t len);
-void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax);
+void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz);
 static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
 static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color);
 static uint32_t Scope_AdcToMillivolt(uint16_t sample);
+static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
+                                          uint16_t trig_idx,
+                                          uint16_t frame_min,
+                                          uint16_t frame_max);
+static uint32_t Scope_GetSampleRateHz(void);
+static uint32_t Scope_ComputeSampleRateHz(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -236,6 +243,7 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 
     // 1. 触发对齐
     uint16_t trig = Scope_FindTriggerIndex(buf, len, &frame_min, &frame_max);
+    uint32_t freq_hz = Scope_EstimateFrequencyHz(buf, len, trig, frame_min, frame_max);
 
     // 2. 先算出这一帧的 y 数组（触发对齐 + 简单平滑）
     uint16_t new_y[ILI9341_WIDTH];
@@ -280,7 +288,99 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
     }
 
     first_draw = 0;
-    Scope_DrawMeasurements(frame_min, frame_max);
+    Scope_DrawMeasurements(frame_min, frame_max, freq_hz);
+}
+
+static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
+                                          uint16_t trig_idx,
+                                          uint16_t frame_min,
+                                          uint16_t frame_max)
+{
+    if (buf == NULL || len < 4U) {
+        return 0U;
+    }
+
+    uint16_t amplitude = frame_max - frame_min;
+    if (amplitude < scope_cfg.trigger_min_delta) {
+        return 0U;
+    }
+
+    uint16_t threshold = (uint16_t)((frame_min + frame_max) / 2U);
+    uint16_t base_idx = trig_idx;
+    if (base_idx >= len) {
+        base_idx %= len;
+    }
+    uint16_t prev = buf[base_idx];
+    uint16_t last_edge_offset = 0;
+    uint32_t period_sum = 0;
+    uint8_t period_count = 0;
+
+    for (uint16_t step = 1; step < len; ++step) {
+        uint16_t idx = trig_idx + step;
+        if (idx >= len) {
+            idx -= len;
+        }
+        uint16_t curr = buf[idx];
+        if (prev < threshold && curr >= threshold) {
+            uint16_t delta = step - last_edge_offset;
+            if (delta > 0U) {
+                period_sum += delta;
+                period_count++;
+                last_edge_offset = step;
+                if (period_count >= 3U) {
+                    break;
+                }
+            }
+        }
+        prev = curr;
+    }
+
+    if (period_count == 0U) {
+        return 0U;
+    }
+
+    uint32_t avg_period = period_sum / period_count;
+    if (avg_period == 0U) {
+        return 0U;
+    }
+
+    uint32_t sample_rate = Scope_GetSampleRateHz();
+    if (sample_rate == 0U) {
+        return 0U;
+    }
+
+    return sample_rate / avg_period;
+}
+
+static uint32_t Scope_GetSampleRateHz(void)
+{
+    if (scope_sample_rate_hz == 0U) {
+        scope_sample_rate_hz = Scope_ComputeSampleRateHz();
+    }
+    return scope_sample_rate_hz;
+}
+
+static uint32_t Scope_ComputeSampleRateHz(void)
+{
+    uint32_t tim_clk = HAL_RCC_GetPCLK1Freq();
+    if (tim_clk == 0U) {
+        return 0U;
+    }
+
+    RCC_ClkInitTypeDef clk_config;
+    uint32_t flash_latency;
+    HAL_RCC_GetClockConfig(&clk_config, &flash_latency);
+    if (clk_config.APB1CLKDivider != RCC_HCLK_DIV1) {
+        tim_clk *= 2U;
+    }
+
+    uint32_t psc = (uint32_t)htim3.Init.Prescaler + 1U;
+    uint32_t arr = (uint32_t)htim3.Init.Period + 1U;
+    if (psc == 0U || arr == 0U) {
+        return 0U;
+    }
+
+    return tim_clk / (psc * arr);
 }
 
 // ADC + DMA 采满一帧后的回调函数
@@ -336,7 +436,7 @@ int main(void)
   // 初始化 LCD
     ILI9341_Init();
     Scope_DrawGrid();
-    Scope_DrawMeasurements(0, 0);
+    Scope_DrawMeasurements(0, 0, 0U);
 
     // 启动 ADC + DMA
     HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, scope_cfg.samples_per_frame);
@@ -373,10 +473,11 @@ static uint32_t Scope_AdcToMillivolt(uint16_t sample)
            / scope_cfg.adc_max_counts;
 }
 
-void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax)
+void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz)
 {
     char line1[32];
     char line2[32];
+    char line3[32];
     uint32_t vmin_mv = Scope_AdcToMillivolt(vmin);
     uint32_t vmax_mv = Scope_AdcToMillivolt(vmax);
     uint32_t vmax_whole = vmax_mv / 1000U;
@@ -391,9 +492,29 @@ void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax)
              (unsigned long)vmin_whole,
              (unsigned long)vmin_frac);
 
+    if (freq_hz == 0U) {
+        snprintf(line3, sizeof(line3), "Freq: ---");
+    } else if (freq_hz >= 1000000U) {
+        uint32_t whole = freq_hz / 1000000U;
+        uint32_t frac = (freq_hz % 1000000U) / 1000U;
+        snprintf(line3, sizeof(line3), "Freq: %lu.%03lu MHz",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    } else if (freq_hz >= 1000U) {
+        uint32_t whole = freq_hz / 1000U;
+        uint32_t frac = (freq_hz % 1000U) / 10U;
+        snprintf(line3, sizeof(line3), "Freq: %lu.%02lu kHz",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    } else {
+        snprintf(line3, sizeof(line3), "Freq: %lu Hz",
+                 (unsigned long)freq_hz);
+    }
+
     ILI9341_FillRect(0, 0, ILI9341_WIDTH, Scope_InfoPanelHeight(), ILI9341_BLACK);
     ILI9341_DrawString(4, 4, line1, ILI9341_YELLOW, ILI9341_BLACK, 2);
     ILI9341_DrawString(4, 24, line2, ILI9341_GREEN, ILI9341_BLACK, 2);
+    ILI9341_DrawString(4, 44, line3, ILI9341_WHITE, ILI9341_BLACK, 2);
     // 信息面板剩余区域可继续打印频率、RMS 等更多指标
 }
 
