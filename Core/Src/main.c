@@ -42,7 +42,7 @@
 #define SCOPE_SAMPLES       320   // 每帧采样 320 个点，对应屏幕宽度
 #define INFO_PANEL_HEIGHT    64   // 信息面板高度，方便展示多个数值
 #define WAVEFORM_HEIGHT     (ILI9341_HEIGHT - INFO_PANEL_HEIGHT)
-#define ADC_REF_VOLTAGE    3.3f
+#define ADC_REF_MILLIVOLT 3300U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,6 +68,7 @@ void SystemClock_Config(void);
 void Scope_DrawGrid(void);
 void Scope_DrawWaveform(uint16_t *buf, uint16_t len);
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax);
+static uint32_t Scope_AdcToMillivolt(uint16_t sample);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -304,15 +305,29 @@ int main(void)
   /* USER CODE END 3 */
 }
 
+static uint32_t Scope_AdcToMillivolt(uint16_t sample)
+{
+    // +2047 实现四舍五入，避免在转换成毫伏时总是向下取整
+    return ((uint32_t)sample * ADC_REF_MILLIVOLT + 2047U) / 4095U;
+}
+
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax)
 {
     char line1[32];
     char line2[32];
-    float vmin_volt = (vmin * ADC_REF_VOLTAGE) / 4095.0f;
-    float vmax_volt = (vmax * ADC_REF_VOLTAGE) / 4095.0f;
+    uint32_t vmin_mv = Scope_AdcToMillivolt(vmin);
+    uint32_t vmax_mv = Scope_AdcToMillivolt(vmax);
+    uint32_t vmax_whole = vmax_mv / 1000U;
+    uint32_t vmax_frac = (vmax_mv % 1000U) / 10U;
+    uint32_t vmin_whole = vmin_mv / 1000U;
+    uint32_t vmin_frac = (vmin_mv % 1000U) / 10U;
 
-    snprintf(line1, sizeof(line1), "Vmax: %.2f V", vmax_volt);
-    snprintf(line2, sizeof(line2), "Vmin: %.2f V", vmin_volt);
+    snprintf(line1, sizeof(line1), "Vmax: %lu.%02lu V",
+             (unsigned long)vmax_whole,
+             (unsigned long)vmax_frac);
+    snprintf(line2, sizeof(line2), "Vmin: %lu.%02lu V",
+             (unsigned long)vmin_whole,
+             (unsigned long)vmin_frac);
 
     ILI9341_FillRect(0, 0, ILI9341_WIDTH, INFO_PANEL_HEIGHT, ILI9341_BLACK);
     ILI9341_DrawString(4, 4, line1, ILI9341_YELLOW, ILI9341_BLACK, 2);
