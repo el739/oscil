@@ -39,10 +39,35 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SCOPE_SAMPLES       320   // 每帧采样 320 个点，对应屏幕宽度
-#define INFO_PANEL_HEIGHT    64   // 信息面板高度，方便展示多个数值
-#define WAVEFORM_HEIGHT     (ILI9341_HEIGHT - INFO_PANEL_HEIGHT)
-#define ADC_REF_MILLIVOLT 3300U
+typedef struct {
+    uint16_t samples_per_frame;
+    uint16_t info_panel_height;
+    uint16_t grid_spacing_px;
+    uint16_t trigger_min_delta;
+    uint16_t adc_ref_millivolt;
+    uint16_t adc_max_counts;
+    uint16_t waveform_color;
+} ScopeConfig;
+
+static const ScopeConfig scope_cfg = {
+    .samples_per_frame = ILI9341_WIDTH,  // 采样点数与屏幕宽度一致，便于逐像素绘制
+    .info_panel_height = 64U,
+    .grid_spacing_px = 40U,
+    .trigger_min_delta = 20U,
+    .adc_ref_millivolt = 3300U,
+    .adc_max_counts = 4095U,
+    .waveform_color = ILI9341_YELLOW
+};
+
+static inline uint16_t Scope_InfoPanelHeight(void)
+{
+    return scope_cfg.info_panel_height;
+}
+
+static inline uint16_t Scope_WaveformHeight(void)
+{
+    return ILI9341_HEIGHT - scope_cfg.info_panel_height;
+}
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,7 +78,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint16_t adc_buf[SCOPE_SAMPLES];
+uint16_t adc_buf[ILI9341_WIDTH];
 volatile uint8_t scope_frame_ready = 0;
 
 // 记录上一帧每个 x 的竖线范围 [y_min, y_max]
@@ -94,7 +119,7 @@ static uint16_t Scope_FindTriggerIndex(uint16_t *buf, uint16_t len,
     if (out_max) *out_max = vmax;
 
     // 如果波形几乎是平的（比如没信号），就不要触发，直接从 0 开始
-    if (vmax - vmin < 20) {   // 20 可以自己调
+    if ((uint16_t)(vmax - vmin) < scope_cfg.trigger_min_delta) {   // 由 scope_cfg.trigger_min_delta 控制
         return 0;
     }
 
@@ -116,12 +141,14 @@ static uint16_t Scope_FindTriggerIndex(uint16_t *buf, uint16_t len,
 // 返回 (x, y) 处的背景颜色：在格线上是蓝色，其他地方是黑色
 static uint16_t Scope_BackgroundColor(uint16_t x, uint16_t y)
 {
-    if (y < INFO_PANEL_HEIGHT) {
+    const uint16_t info_panel = Scope_InfoPanelHeight();
+    if (y < info_panel) {
         return ILI9341_BLACK;
     }
     // 和你画网格时保持一致：每 40 像素一条线（网格只覆盖波形区域）
-    uint16_t gy = y - INFO_PANEL_HEIGHT;
-    if ((x % 40) == 0 || (gy % 40) == 0) {
+    uint16_t gy = y - info_panel;
+    if ((x % scope_cfg.grid_spacing_px) == 0 ||
+        (gy % scope_cfg.grid_spacing_px) == 0) {
         return ILI9341_BLUE;   // 网格线
     } else {
         return ILI9341_BLACK;  // 背景
@@ -167,15 +194,19 @@ static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t colo
 // 画背景网格
 void Scope_DrawGrid(void)
 {
-    ILI9341_FillScreen(ILI9341_BLACK);
-    ILI9341_FillRect(0, 0, ILI9341_WIDTH, INFO_PANEL_HEIGHT, ILI9341_BLACK);
+    const uint16_t info_panel = Scope_InfoPanelHeight();
+    const uint16_t grid_spacing = scope_cfg.grid_spacing_px;
+    const uint16_t waveform_height = Scope_WaveformHeight();
 
-    for (int x = 0; x < ILI9341_WIDTH; x += 40) {
-        for (int y = INFO_PANEL_HEIGHT; y < ILI9341_HEIGHT; y++) {
+    ILI9341_FillScreen(ILI9341_BLACK);
+    ILI9341_FillRect(0, 0, ILI9341_WIDTH, info_panel, ILI9341_BLACK);
+
+    for (int x = 0; x < ILI9341_WIDTH; x += grid_spacing) {
+        for (int y = info_panel; y < ILI9341_HEIGHT; y++) {
             ILI9341_DrawPixel(x, y, ILI9341_BLUE);
         }
     }
-    for (int y = INFO_PANEL_HEIGHT; y < ILI9341_HEIGHT; y += 40) {
+    for (int y = info_panel; y < ILI9341_HEIGHT; y += grid_spacing) {
         for (int x = 0; x < ILI9341_WIDTH; x++) {
             ILI9341_DrawPixel(x, y, ILI9341_BLUE);
         }
@@ -183,7 +214,7 @@ void Scope_DrawGrid(void)
 
     // 初始化上一帧竖线范围：先都设成屏幕中间一个点
     for (int x = 0; x < ILI9341_WIDTH; x++) {
-        uint16_t mid = INFO_PANEL_HEIGHT + (WAVEFORM_HEIGHT / 2);
+        uint16_t mid = info_panel + (waveform_height / 2);
         last_y_min[x] = mid;
         last_y_max[x] = mid;
     }
@@ -196,7 +227,10 @@ void Scope_DrawGrid(void)
 // 按触发对齐后画波形，使用“擦旧点+画新点”的方式，避免网格闪烁
 void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 {
+    if (len > scope_cfg.samples_per_frame) len = scope_cfg.samples_per_frame;
     if (len > ILI9341_WIDTH) len = ILI9341_WIDTH;
+    const uint16_t waveform_height = Scope_WaveformHeight();
+    const uint16_t info_panel = Scope_InfoPanelHeight();
     uint16_t frame_min = 0;
     uint16_t frame_max = 0;
 
@@ -214,9 +248,9 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         uint16_t val = buf[idx];   // 不做平滑，直接用原始采样值
 
 
-        if (val > 4095) val = 4095;
-        uint16_t y = INFO_PANEL_HEIGHT + (WAVEFORM_HEIGHT - 1)
-                   - (val * (WAVEFORM_HEIGHT - 1) / 4095);
+        if (val > scope_cfg.adc_max_counts) val = scope_cfg.adc_max_counts;
+        uint16_t y = info_panel + (waveform_height - 1)
+                   - (val * (waveform_height - 1) / scope_cfg.adc_max_counts);
 
         new_y[i] = y;
     }
@@ -238,7 +272,7 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         if (ymax_new >= ILI9341_HEIGHT) ymax_new = ILI9341_HEIGHT - 1;
 
         // 3.3 画新竖线
-        Scope_DrawColumn(x, ymin_new, ymax_new, ILI9341_YELLOW);
+        Scope_DrawColumn(x, ymin_new, ymax_new, scope_cfg.waveform_color);
 
         // 3.4 更新记录
         last_y_min[x] = ymin_new;
@@ -305,7 +339,7 @@ int main(void)
     Scope_DrawMeasurements(0, 0);
 
     // 启动 ADC + DMA
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, SCOPE_SAMPLES);
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, scope_cfg.samples_per_frame);
 
     // 启动 TIM3，产生 TRGO 触发 ADC
     HAL_TIM_Base_Start(&htim3);
@@ -320,7 +354,7 @@ int main(void)
 	  if (scope_frame_ready)
 	  {
 	      scope_frame_ready = 0;
-	      Scope_DrawWaveform(adc_buf, SCOPE_SAMPLES);
+	      Scope_DrawWaveform(adc_buf, scope_cfg.samples_per_frame);
 	      // 这里现在已经是有触发对齐和擦除逻辑的“简易示波器”了
 	  }
     /* USER CODE END WHILE */
@@ -334,7 +368,9 @@ int main(void)
 static uint32_t Scope_AdcToMillivolt(uint16_t sample)
 {
     // +2047 实现四舍五入，避免在转换成毫伏时总是向下取整
-    return ((uint32_t)sample * ADC_REF_MILLIVOLT + 2047U) / 4095U;
+    uint32_t rounding = scope_cfg.adc_max_counts / 2U;
+    return ((uint32_t)sample * scope_cfg.adc_ref_millivolt + rounding)
+           / scope_cfg.adc_max_counts;
 }
 
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax)
@@ -355,7 +391,7 @@ void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax)
              (unsigned long)vmin_whole,
              (unsigned long)vmin_frac);
 
-    ILI9341_FillRect(0, 0, ILI9341_WIDTH, INFO_PANEL_HEIGHT, ILI9341_BLACK);
+    ILI9341_FillRect(0, 0, ILI9341_WIDTH, Scope_InfoPanelHeight(), ILI9341_BLACK);
     ILI9341_DrawString(4, 4, line1, ILI9341_YELLOW, ILI9341_BLACK, 2);
     ILI9341_DrawString(4, 24, line2, ILI9341_GREEN, ILI9341_BLACK, 2);
     // 信息面板剩余区域可继续打印频率、RMS 等更多指标
