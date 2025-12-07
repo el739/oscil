@@ -164,10 +164,6 @@ static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center)
     {
         span = 1U;
     }
-    if (span > scope_cfg.adc_max_counts)
-    {
-        span = scope_cfg.adc_max_counts;
-    }
     if (span < scope_cfg.trigger_min_delta)
     {
         span = scope_cfg.trigger_min_delta;
@@ -191,25 +187,10 @@ static int32_t Scope_SampleToY(int32_t sample)
     int32_t span = (int32_t)scope_display_settings.vertical.span_counts;
     if (span <= 0)
     {
-        span = scope_cfg.adc_max_counts;
+        span = (int32_t)scope_cfg.adc_max_counts;
     }
     int32_t half_span = span / 2;
     int32_t lower = scope_display_settings.vertical.center_counts - half_span;
-    int32_t upper = lower + span;
-    if (lower < 0)
-    {
-        lower = 0;
-        upper = span;
-    }
-    if (upper > (int32_t)scope_cfg.adc_max_counts)
-    {
-        upper = scope_cfg.adc_max_counts;
-        lower = upper - span;
-        if (lower < 0)
-        {
-            lower = 0;
-        }
-    }
     int32_t relative = sample - lower;
     int32_t y = info_panel + (waveform_height - 1)
                 - (relative * (waveform_height - 1)) / span;
@@ -364,10 +345,6 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
     }
 
     uint32_t margin_span = span + span / 5U;
-    if (margin_span > scope_cfg.adc_max_counts)
-    {
-        margin_span = scope_cfg.adc_max_counts;
-    }
     if (margin_span == 0U)
     {
         margin_span = scope_cfg.trigger_min_delta;
