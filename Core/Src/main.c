@@ -60,6 +60,28 @@ static const ScopeConfig scope_cfg = {
     .waveform_color = ILI9341_YELLOW
 };
 
+typedef struct {
+    uint32_t span_counts;
+    int32_t center_counts;
+} ScopeVerticalSettings;
+
+typedef struct {
+    uint32_t samples_visible;
+    int32_t center_sample;
+} ScopeHorizontalSettings;
+
+typedef struct {
+    ScopeVerticalSettings vertical;
+    ScopeHorizontalSettings horizontal;
+} ScopeDisplaySettings;
+
+typedef struct {
+    volatile uint8_t autoset_request;
+} ScopeControlFlags;
+
+static ScopeDisplaySettings scope_display_settings;
+static ScopeControlFlags scope_control = {0};
+
 static inline uint16_t Scope_InfoPanelHeight(void)
 {
     return scope_cfg.info_panel_height;
@@ -98,6 +120,14 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len);
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz);
 static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
 static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color);
+static void Scope_DisplaySettingsInit(void);
+static void Scope_ResetVerticalWindow(void);
+static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
+static int32_t Scope_SampleToY(int32_t sample);
+static uint8_t Scope_ClipWaveformSegment(int32_t *y0, int32_t *y1);
+static void Scope_RequestAutoSet(void);
+static uint8_t Scope_ConsumeAutoSetRequest(void);
+static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len);
 static uint32_t Scope_AdcToMillivolt(uint16_t sample);
 static void Scope_UpdateInfoLine(uint16_t x, uint16_t y, const char *text,
                                  uint16_t color, char *last_text, size_t buf_len);
@@ -201,6 +231,132 @@ static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t colo
     if (span == 0) return;
     ILI9341_DrawColorSpan(x, y0, span, color);
 }
+
+static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center)
+{
+    if (span == 0U) {
+        span = 1U;
+    }
+    if (span > scope_cfg.adc_max_counts) {
+        span = scope_cfg.adc_max_counts;
+    }
+    if (span < scope_cfg.trigger_min_delta) {
+        span = scope_cfg.trigger_min_delta;
+    }
+    if (center < 0) {
+        center = 0;
+    }
+    if (center > (int32_t)scope_cfg.adc_max_counts) {
+        center = scope_cfg.adc_max_counts;
+    }
+    scope_display_settings.vertical.span_counts = span;
+    scope_display_settings.vertical.center_counts = center;
+}
+
+static void Scope_ResetVerticalWindow(void)
+{
+    Scope_UpdateVerticalWindow(scope_cfg.adc_max_counts,
+                               scope_cfg.adc_max_counts / 2U);
+}
+
+static void Scope_DisplaySettingsInit(void)
+{
+    Scope_ResetVerticalWindow();
+    scope_display_settings.horizontal.samples_visible = scope_cfg.samples_per_frame;
+    scope_display_settings.horizontal.center_sample = scope_cfg.samples_per_frame / 2U;
+}
+
+static uint16_t Scope_SampleToY(uint16_t sample)
+{
+    const uint16_t info_panel = Scope_InfoPanelHeight();
+    const uint16_t waveform_height = Scope_WaveformHeight();
+    int32_t span = (int32_t)scope_display_settings.vertical.span_counts;
+    if (span <= 0) {
+        span = scope_cfg.adc_max_counts;
+    }
+    int32_t half_span = span / 2;
+    int32_t lower = scope_display_settings.vertical.center_counts - half_span;
+    int32_t upper = lower + span;
+    if (lower < 0) {
+        lower = 0;
+        upper = span;
+    }
+    if (upper > (int32_t)scope_cfg.adc_max_counts) {
+        upper = scope_cfg.adc_max_counts;
+        lower = upper - span;
+        if (lower < 0) {
+            lower = 0;
+        }
+    }
+    int32_t clamped = sample;
+    if (clamped < lower) clamped = lower;
+    if (clamped > upper) clamped = upper;
+    int32_t relative = clamped - lower;
+    int32_t y = info_panel + (waveform_height - 1)
+                - (relative * (waveform_height - 1)) / span;
+    if (y < (int32_t)info_panel) {
+        y = info_panel;
+    }
+    if (y >= ILI9341_HEIGHT) {
+        y = ILI9341_HEIGHT - 1;
+    }
+    return (uint16_t)y;
+}
+
+static void Scope_RequestAutoSet(void)
+{
+    scope_control.autoset_request = 1U;
+}
+
+static uint8_t Scope_ConsumeAutoSetRequest(void)
+{
+    uint8_t pending;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    pending = scope_control.autoset_request;
+    scope_control.autoset_request = 0U;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return pending;
+}
+
+static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
+{
+    if (buf == NULL || len == 0U) {
+        return;
+    }
+
+    uint16_t vmin = 0xFFFF;
+    uint16_t vmax = 0;
+    for (uint16_t i = 0; i < len; ++i) {
+        uint16_t sample = buf[i];
+        if (sample < vmin) vmin = sample;
+        if (sample > vmax) vmax = sample;
+    }
+
+    if (vmax < vmin) {
+        Scope_ResetVerticalWindow();
+        return;
+    }
+
+    uint32_t span = (uint32_t)vmax - (uint32_t)vmin;
+    if (span < scope_cfg.trigger_min_delta) {
+        Scope_ResetVerticalWindow();
+        return;
+    }
+
+    uint32_t margin_span = span + span / 5U; // add ~20% headroom
+    if (margin_span > scope_cfg.adc_max_counts) {
+        margin_span = scope_cfg.adc_max_counts;
+    }
+    if (margin_span == 0U) {
+        margin_span = scope_cfg.trigger_min_delta;
+    }
+
+    uint32_t center = (uint32_t)vmin + span / 2U;
+    Scope_UpdateVerticalWindow(margin_span, (int32_t)center);
+}
 // 画背景网格
 void Scope_DrawGrid(void)
 {
@@ -239,8 +395,6 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 {
     if (len > scope_cfg.samples_per_frame) len = scope_cfg.samples_per_frame;
     if (len > ILI9341_WIDTH) len = ILI9341_WIDTH;
-    const uint16_t waveform_height = Scope_WaveformHeight();
-    const uint16_t info_panel = Scope_InfoPanelHeight();
     uint16_t frame_min = 0;
     uint16_t frame_max = 0;
 
@@ -259,11 +413,10 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         uint16_t val = buf[idx];   // 不做平滑，直接用原始采样值
 
 
-        if (val > scope_cfg.adc_max_counts) val = scope_cfg.adc_max_counts;
-        uint16_t y = info_panel + (waveform_height - 1)
-                   - (val * (waveform_height - 1) / scope_cfg.adc_max_counts);
-
-        new_y[i] = y;
+        if (val > scope_cfg.adc_max_counts) {
+            val = scope_cfg.adc_max_counts;
+        }
+        new_y[i] = Scope_SampleToY(val);
     }
 
     // 3. 对每一个 x：先擦旧竖线，再画新竖线，再更新范围
@@ -438,6 +591,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   // 初始化 LCD
     ILI9341_Init();
+    Scope_DisplaySettingsInit();
     Scope_DrawGrid();
     Scope_DrawMeasurements(0, 0, 0U);
 
@@ -457,6 +611,10 @@ int main(void)
 	  if (scope_frame_ready)
 	  {
 	      scope_frame_ready = 0;
+	      if (Scope_ConsumeAutoSetRequest())
+	      {
+	          Scope_ApplyAutoSet(adc_buf, scope_cfg.samples_per_frame);
+	      }
 	      Scope_DrawWaveform(adc_buf, scope_cfg.samples_per_frame);
 	      // 这里现在已经是有触发对齐和擦除逻辑的“简易示波器”了
 	  }
@@ -606,6 +764,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	{
     /* Toggle LED1 */
 		HAL_GPIO_TogglePin(LD2_GPIO_Port,LD2_Pin);
+        Scope_RequestAutoSet();
 	}
 }
 /* USER CODE END 4 */
