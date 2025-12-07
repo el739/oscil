@@ -30,6 +30,7 @@
 /* USER CODE BEGIN Includes */
 #include "ili9341.h"
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,6 +99,8 @@ void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz);
 static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
 static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color);
 static uint32_t Scope_AdcToMillivolt(uint16_t sample);
+static void Scope_UpdateInfoLine(uint16_t x, uint16_t y, const char *text,
+                                 uint16_t color, char *last_text, size_t buf_len);
 static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
                                           uint16_t trig_idx,
                                           uint16_t frame_min,
@@ -473,8 +476,41 @@ static uint32_t Scope_AdcToMillivolt(uint16_t sample)
            / scope_cfg.adc_max_counts;
 }
 
+// 仅当内容变化时刷新信息面板的单行文字，避免整块擦除带来的闪烁
+static void Scope_UpdateInfoLine(uint16_t x, uint16_t y, const char *text,
+                                 uint16_t color, char *last_text, size_t buf_len)
+{
+    const uint8_t font_size = 2U;
+    const uint16_t char_width = 6U * font_size;
+    const uint16_t char_height = 8U * font_size;
+
+    if (text == NULL || last_text == NULL || buf_len == 0U) {
+        return;
+    }
+
+    if (strncmp(text, last_text, buf_len) == 0) {
+        return;
+    }
+
+    ILI9341_DrawString(x, y, text, color, ILI9341_BLACK, font_size);
+
+    size_t new_len = strlen(text);
+    size_t prev_len = strlen(last_text);
+    if (new_len < prev_len) {
+        uint16_t clear_x = x + (uint16_t)(new_len * char_width);
+        uint16_t clear_width = (uint16_t)((prev_len - new_len) * char_width);
+        ILI9341_FillRect(clear_x, y, clear_width, char_height, ILI9341_BLACK);
+    }
+
+    strncpy(last_text, text, buf_len);
+    last_text[buf_len - 1U] = '\0';
+}
+
 void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz)
 {
+    static char last_line1[32];
+    static char last_line2[32];
+    static char last_line3[32];
     char line1[32];
     char line2[32];
     char line3[32];
@@ -511,10 +547,9 @@ void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz)
                  (unsigned long)freq_hz);
     }
 
-    ILI9341_FillRect(0, 0, ILI9341_WIDTH, Scope_InfoPanelHeight(), ILI9341_BLACK);
-    ILI9341_DrawString(4, 4, line1, ILI9341_YELLOW, ILI9341_BLACK, 2);
-    ILI9341_DrawString(4, 24, line2, ILI9341_GREEN, ILI9341_BLACK, 2);
-    ILI9341_DrawString(4, 44, line3, ILI9341_WHITE, ILI9341_BLACK, 2);
+    Scope_UpdateInfoLine(4U, 4U, line1, ILI9341_YELLOW, last_line1, sizeof(last_line1));
+    Scope_UpdateInfoLine(4U, 24U, line2, ILI9341_GREEN, last_line2, sizeof(last_line2));
+    Scope_UpdateInfoLine(4U, 44U, line3, ILI9341_WHITE, last_line3, sizeof(last_line3));
     // 信息面板剩余区域可继续打印频率、RMS 等更多指标
 }
 
