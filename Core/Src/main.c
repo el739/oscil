@@ -266,10 +266,10 @@ static void Scope_DisplaySettingsInit(void)
     scope_display_settings.horizontal.center_sample = scope_cfg.samples_per_frame / 2U;
 }
 
-static uint16_t Scope_SampleToY(uint16_t sample)
+static int32_t Scope_SampleToY(int32_t sample)
 {
-    const uint16_t info_panel = Scope_InfoPanelHeight();
-    const uint16_t waveform_height = Scope_WaveformHeight();
+    const int32_t info_panel = (int32_t)Scope_InfoPanelHeight();
+    const int32_t waveform_height = (int32_t)Scope_WaveformHeight();
     int32_t span = (int32_t)scope_display_settings.vertical.span_counts;
     if (span <= 0) {
         span = scope_cfg.adc_max_counts;
@@ -288,19 +288,37 @@ static uint16_t Scope_SampleToY(uint16_t sample)
             lower = 0;
         }
     }
-    int32_t clamped = sample;
-    if (clamped < lower) clamped = lower;
-    if (clamped > upper) clamped = upper;
-    int32_t relative = clamped - lower;
+    int32_t relative = sample - lower;
     int32_t y = info_panel + (waveform_height - 1)
                 - (relative * (waveform_height - 1)) / span;
-    if (y < (int32_t)info_panel) {
-        y = info_panel;
+    return y;
+}
+
+static uint8_t Scope_ClipWaveformSegment(int32_t *y0, int32_t *y1)
+{
+    if (y0 == NULL || y1 == NULL) {
+        return 0U;
     }
-    if (y >= ILI9341_HEIGHT) {
-        y = ILI9341_HEIGHT - 1;
+    int32_t top = (int32_t)Scope_InfoPanelHeight();
+    int32_t bottom = (int32_t)ILI9341_HEIGHT - 1;
+
+    if ((*y0 < top && *y1 < top) || (*y0 > bottom && *y1 > bottom)) {
+        return 0U;
     }
-    return (uint16_t)y;
+
+    if (*y0 < top) {
+        *y0 = top;
+    } else if (*y0 > bottom) {
+        *y0 = bottom;
+    }
+
+    if (*y1 < top) {
+        *y1 = top;
+    } else if (*y1 > bottom) {
+        *y1 = bottom;
+    }
+
+    return 1U;
 }
 
 static void Scope_RequestAutoSet(void)
@@ -403,7 +421,7 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
     uint32_t freq_hz = Scope_EstimateFrequencyHz(buf, len, trig, frame_min, frame_max);
 
     // 2. 先算出这一帧的 y 数组（触发对齐 + 简单平滑）
-    uint16_t new_y[ILI9341_WIDTH];
+    int32_t new_y[ILI9341_WIDTH];
 
     for (uint16_t i = 0; i < len; i++) {
         uint16_t idx = trig + i;
@@ -411,12 +429,10 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 
         // 代替那段 sum/cnt 的代码
         uint16_t val = buf[idx];   // 不做平滑，直接用原始采样值
-
-
         if (val > scope_cfg.adc_max_counts) {
             val = scope_cfg.adc_max_counts;
         }
-        new_y[i] = Scope_SampleToY(val);
+        new_y[i] = Scope_SampleToY((int32_t)val);
     }
 
     // 3. 对每一个 x：先擦旧竖线，再画新竖线，再更新范围
@@ -428,15 +444,26 @@ void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         }
 
         // 3.2 计算这一帧在这个 x 上的新竖线范围
-        uint16_t y1 = new_y[x];
-        uint16_t y0 = (x > 0) ? new_y[x - 1] : new_y[x];
+        int32_t y1 = new_y[x];
+        int32_t y0 = (x > 0) ? new_y[x - 1] : new_y[x];
 
-        uint16_t ymin_new = (y0 < y1) ? y0 : y1;
-        uint16_t ymax_new = (y0 > y1) ? y0 : y1;
-        if (ymax_new >= ILI9341_HEIGHT) ymax_new = ILI9341_HEIGHT - 1;
+        uint16_t ymin_new = Scope_InfoPanelHeight();
+        uint16_t ymax_new = Scope_InfoPanelHeight();
 
-        // 3.3 画新竖线
-        Scope_DrawColumn(x, ymin_new, ymax_new, scope_cfg.waveform_color);
+        if (Scope_ClipWaveformSegment(&y0, &y1)) {
+            int32_t ymin_clip = (y0 < y1) ? y0 : y1;
+            int32_t ymax_clip = (y0 > y1) ? y0 : y1;
+            if (ymax_clip >= (int32_t)ILI9341_HEIGHT) {
+                ymax_clip = ILI9341_HEIGHT - 1;
+            }
+            if (ymin_clip < (int32_t)Scope_InfoPanelHeight()) {
+                ymin_clip = Scope_InfoPanelHeight();
+            }
+            Scope_DrawColumn(x, (uint16_t)ymin_clip, (uint16_t)ymax_clip,
+                             scope_cfg.waveform_color);
+            ymin_new = (uint16_t)ymin_clip;
+            ymax_new = (uint16_t)ymax_clip;
+        }
 
         // 3.4 更新记录
         last_y_min[x] = ymin_new;
