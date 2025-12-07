@@ -600,7 +600,14 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if (GPIO_Pin == GPIO_PIN_13)
+	{
+/* Toggle LED1 */
+		HAL_GPIO_TogglePin(LD1_GPIO_Port,LD1_Pin);
+	}
+}
 /* USER CODE END 4 */
 
 /**

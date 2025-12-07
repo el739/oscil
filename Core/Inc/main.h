@@ -91,6 +91,8 @@ void Error_Handler(void);
 #define LD2_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
+#define LD1_Pin        GPIO_PIN_0
+#define LD1_GPIO_Port  GPIOB
 
 /* USER CODE END Private defines */
 
