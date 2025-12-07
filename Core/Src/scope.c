@@ -74,16 +74,18 @@ static void Scope_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_h
 static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
 static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
+static void Scope_UpdateHorizontalWindow(uint32_t span_samples);
+static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples);
 static int32_t Scope_SampleToY(int32_t sample);
 static uint8_t Scope_ClipWaveformSegment(int32_t *y0, int32_t *y1);
 static void Scope_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
 static void Scope_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color);
 static uint16_t Scope_FindTriggerIndex(uint16_t *buf, uint16_t len,
                                        uint16_t *out_min, uint16_t *out_max);
-static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
-                                          uint16_t trig_idx,
-                                          uint16_t frame_min,
-                                          uint16_t frame_max);
+static uint32_t Scope_EstimatePeriodSamples(uint16_t *buf, uint16_t len,
+                                            uint16_t trig_idx,
+                                            uint16_t frame_min,
+                                            uint16_t frame_max);
 static uint32_t Scope_GetSampleRateHz(void);
 static uint32_t Scope_ComputeSampleRateHz(void);
 static uint32_t Scope_AdcToMillivolt(uint16_t sample);
@@ -148,8 +150,7 @@ static uint8_t Scope_ConsumeAutoSetRequest(void)
 static void Scope_DisplaySettingsInit(void)
 {
     Scope_ResetVerticalWindow();
-    scope_display_settings.horizontal.samples_visible = scope_cfg.samples_per_frame;
-    scope_display_settings.horizontal.center_sample = scope_cfg.samples_per_frame / 2U;
+    Scope_UpdateHorizontalWindow(scope_cfg.samples_per_frame);
 }
 
 static void Scope_ResetVerticalWindow(void)
@@ -178,6 +179,57 @@ static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center)
     }
     scope_display_settings.vertical.span_counts = span;
     scope_display_settings.vertical.center_counts = center;
+}
+
+static void Scope_UpdateHorizontalWindow(uint32_t span_samples)
+{
+    uint32_t max_samples = scope_cfg.samples_per_frame;
+    if (max_samples == 0U)
+    {
+        scope_display_settings.horizontal.samples_visible = 0U;
+        scope_display_settings.horizontal.center_sample = 0;
+        return;
+    }
+
+    if (span_samples == 0U)
+    {
+        span_samples = max_samples;
+    }
+
+    if (span_samples < 2U)
+    {
+        span_samples = 2U;
+    }
+
+    if (span_samples > max_samples)
+    {
+        span_samples = max_samples;
+    }
+
+    scope_display_settings.horizontal.samples_visible = (uint16_t)span_samples;
+    scope_display_settings.horizontal.center_sample =
+        (int32_t)(scope_display_settings.horizontal.samples_visible / 2U);
+}
+
+static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples)
+{
+    if (available_samples == 0U)
+    {
+        return 0U;
+    }
+
+    uint16_t visible = scope_display_settings.horizontal.samples_visible;
+    if (visible == 0U || visible > available_samples)
+    {
+        visible = available_samples;
+    }
+
+    if (visible == 0U)
+    {
+        visible = 1U;
+    }
+
+    return visible;
 }
 
 static int32_t Scope_SampleToY(int32_t sample)
@@ -316,31 +368,22 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
         return;
     }
 
-    uint16_t vmin = 0xFFFF;
-    uint16_t vmax = 0;
-    for (uint16_t i = 0; i < len; ++i)
-    {
-        uint16_t sample = buf[i];
-        if (sample < vmin)
-        {
-            vmin = sample;
-        }
-        if (sample > vmax)
-        {
-            vmax = sample;
-        }
-    }
+    uint16_t frame_min = 0xFFFFU;
+    uint16_t frame_max = 0U;
+    uint16_t trig = Scope_FindTriggerIndex(buf, len, &frame_min, &frame_max);
 
-    if (vmax < vmin)
+    if (frame_max < frame_min)
     {
         Scope_ResetVerticalWindow();
+        Scope_UpdateHorizontalWindow(scope_cfg.samples_per_frame);
         return;
     }
 
-    uint32_t span = (uint32_t)vmax - (uint32_t)vmin;
+    uint32_t span = (uint32_t)frame_max - (uint32_t)frame_min;
     if (span < scope_cfg.trigger_min_delta)
     {
         Scope_ResetVerticalWindow();
+        Scope_UpdateHorizontalWindow(scope_cfg.samples_per_frame);
         return;
     }
 
@@ -350,8 +393,24 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
         margin_span = scope_cfg.trigger_min_delta;
     }
 
-    uint32_t center = (uint32_t)vmin + span / 2U;
+    uint32_t center = (uint32_t)frame_min + span / 2U;
     Scope_UpdateVerticalWindow(margin_span, (int32_t)center);
+
+    uint32_t period_samples = Scope_EstimatePeriodSamples(buf, len, trig,
+                                                          frame_min, frame_max);
+    if (period_samples == 0U)
+    {
+        Scope_UpdateHorizontalWindow(scope_cfg.samples_per_frame);
+    }
+    else
+    {
+        uint32_t span_samples = period_samples * 2U;
+        if (span_samples == 0U)
+        {
+            span_samples = scope_cfg.samples_per_frame;
+        }
+        Scope_UpdateHorizontalWindow(span_samples);
+    }
 }
 
 static uint16_t Scope_FindTriggerIndex(uint16_t *buf, uint16_t len,
@@ -441,24 +500,62 @@ static void Scope_DrawGrid(void)
 
 static void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
 {
+    if (buf == NULL || len == 0U)
+    {
+        return;
+    }
+
     if (len > scope_cfg.samples_per_frame)
     {
         len = scope_cfg.samples_per_frame;
     }
-    if (len > ILI9341_WIDTH)
+
+    if (len == 0U)
     {
-        len = ILI9341_WIDTH;
+        return;
     }
+
     uint16_t frame_min = 0;
     uint16_t frame_max = 0;
 
     uint16_t trig = Scope_FindTriggerIndex(buf, len, &frame_min, &frame_max);
-    uint32_t freq_hz = Scope_EstimateFrequencyHz(buf, len, trig, frame_min, frame_max);
+    uint32_t period_samples = Scope_EstimatePeriodSamples(buf, len, trig,
+                                                          frame_min, frame_max);
+    uint32_t freq_hz = 0U;
+    if (period_samples != 0U)
+    {
+        uint32_t sample_rate = Scope_GetSampleRateHz();
+        if (sample_rate != 0U)
+        {
+            freq_hz = sample_rate / period_samples;
+        }
+    }
+
+    uint16_t visible_samples = Scope_GetVisibleSampleCount(len);
+    if (visible_samples == 0U)
+    {
+        return;
+    }
 
     int32_t new_y[SCOPE_FRAME_SAMPLES];
-    for (uint16_t i = 0; i < len; i++)
+    uint16_t draw_width = scope_cfg.samples_per_frame;
+    if (draw_width > ILI9341_WIDTH)
     {
-        uint16_t idx = trig + i;
+        draw_width = ILI9341_WIDTH;
+    }
+    if (draw_width == 0U)
+    {
+        return;
+    }
+    for (uint16_t i = 0; i < draw_width; i++)
+    {
+        uint32_t sample_offset = ((uint32_t)i * visible_samples) / draw_width;
+        if (sample_offset >= len)
+        {
+            sample_offset %= len;
+        }
+
+        uint16_t idx = trig + (uint16_t)sample_offset;
         if (idx >= len)
         {
             idx -= len;
@@ -472,7 +569,7 @@ static void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         new_y[i] = Scope_SampleToY((int32_t)val);
     }
 
-    for (uint16_t x = 0; x < len; x++)
+    for (uint16_t x = 0; x < draw_width; x++)
     {
         if (!first_draw)
         {
@@ -511,10 +608,10 @@ static void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
     Scope_DrawMeasurements(frame_min, frame_max, freq_hz);
 }
 
-static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
-                                          uint16_t trig_idx,
-                                          uint16_t frame_min,
-                                          uint16_t frame_max)
+static uint32_t Scope_EstimatePeriodSamples(uint16_t *buf, uint16_t len,
+                                            uint16_t trig_idx,
+                                            uint16_t frame_min,
+                                            uint16_t frame_max)
 {
     if (buf == NULL || len < 4U)
     {
@@ -574,13 +671,7 @@ static uint32_t Scope_EstimateFrequencyHz(uint16_t *buf, uint16_t len,
         return 0U;
     }
 
-    uint32_t sample_rate = Scope_GetSampleRateHz();
-    if (sample_rate == 0U)
-    {
-        return 0U;
-    }
-
-    return sample_rate / avg_period;
+    return avg_period;
 }
 
 static uint32_t Scope_GetSampleRateHz(void)
