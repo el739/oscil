@@ -537,6 +537,18 @@ static void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
         return;
     }
 
+    int32_t center_sample = scope_display_settings.horizontal.center_sample;
+    if (center_sample < 0)
+    {
+        center_sample = 0;
+    }
+    if (center_sample >= (int32_t)visible_samples)
+    {
+        center_sample = (int32_t)(visible_samples / 2U);
+    }
+    int32_t start_offset = (int32_t)trig - center_sample; /* keep trigger near center */
+    int32_t samples_in_frame = (int32_t)len;
+
     int32_t new_y[SCOPE_FRAME_SAMPLES];
     uint16_t draw_width = scope_cfg.samples_per_frame;
     if (draw_width > ILI9341_WIDTH)
@@ -549,17 +561,14 @@ static void Scope_DrawWaveform(uint16_t *buf, uint16_t len)
     }
     for (uint16_t i = 0; i < draw_width; i++)
     {
-        uint32_t sample_offset = ((uint32_t)i * visible_samples) / draw_width;
-        if (sample_offset >= len)
+        uint32_t scaled = ((uint32_t)i * visible_samples);
+        int32_t relative = start_offset + (int32_t)(scaled / draw_width);
+        int32_t wrapped = relative % samples_in_frame;
+        if (wrapped < 0)
         {
-            sample_offset %= len;
+            wrapped += samples_in_frame;
         }
-
-        uint16_t idx = trig + (uint16_t)sample_offset;
-        if (idx >= len)
-        {
-            idx -= len;
-        }
+        uint16_t idx = (uint16_t)wrapped;
 
         uint16_t val = buf[idx];
         if (val > scope_cfg.adc_max_counts)
