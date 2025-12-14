@@ -48,8 +48,23 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint16_t adc_buf[SCOPE_FRAME_SAMPLES];
-volatile uint8_t scope_frame_ready = 0;
+enum { SCOPE_DMA_BUFFER_COUNT = 2U };
+
+static uint16_t adc_dma_buf[SCOPE_DMA_BUFFER_COUNT][SCOPE_FRAME_SAMPLES];
+
+typedef struct
+{
+    uint8_t order[SCOPE_DMA_BUFFER_COUNT];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t pending;
+    uint32_t overruns;
+} ScopeDmaFrameQueue;
+
+static ScopeDmaFrameQueue scope_dma_queue = {0};
+static volatile uint8_t scope_frame_ready = 0U;
+static void Scope_DmaEnqueueBuffer(uint8_t buffer_index);
+static uint16_t *Scope_DmaDequeueBuffer(void);
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -63,7 +78,15 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1)
     {
-        scope_frame_ready = 1;
+        Scope_DmaEnqueueBuffer(1U);
+    }
+}
+
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance == ADC1)
+    {
+        Scope_DmaEnqueueBuffer(0U);
     }
 }
 /* USER CODE END 0 */
@@ -106,7 +129,9 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   Scope_Init();
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, Scope_FrameSampleCount());
+  const uint16_t frame_samples = Scope_FrameSampleCount();
+  const uint32_t dma_samples = (uint32_t)frame_samples * SCOPE_DMA_BUFFER_COUNT;
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_dma_buf[0], dma_samples);
   HAL_TIM_Base_Start(&htim3);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   /* USER CODE END 2 */
@@ -115,11 +140,14 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if (scope_frame_ready)
-	  {
-	      scope_frame_ready = 0;
-	      Scope_ProcessFrame(adc_buf, Scope_FrameSampleCount());
-	  }
+      if (scope_frame_ready)
+      {
+          uint16_t *ready_buf = Scope_DmaDequeueBuffer();
+          if (ready_buf != NULL)
+          {
+              Scope_ProcessFrame(ready_buf, frame_samples);
+          }
+      }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -185,6 +213,61 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	}
 }
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_Scope_DmaEnqueueBuffer */
+/**
+  * @brief Queue ADC buffer index for processing, dropping frames on overflow.
+  */
+/* USER CODE END Header_Scope_DmaEnqueueBuffer */
+static void Scope_DmaEnqueueBuffer(uint8_t buffer_index)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (scope_dma_queue.pending == SCOPE_DMA_BUFFER_COUNT)
+    {
+        scope_dma_queue.tail = (uint8_t)((scope_dma_queue.tail + 1U) % SCOPE_DMA_BUFFER_COUNT);
+        scope_dma_queue.pending--;
+        scope_dma_queue.overruns++;
+    }
+
+    scope_dma_queue.order[scope_dma_queue.head] = buffer_index;
+    scope_dma_queue.head = (uint8_t)((scope_dma_queue.head + 1U) % SCOPE_DMA_BUFFER_COUNT);
+    scope_dma_queue.pending++;
+    scope_frame_ready = 1U;
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static uint16_t *Scope_DmaDequeueBuffer(void)
+{
+    uint16_t *buffer = NULL;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (scope_dma_queue.pending > 0U)
+    {
+        uint8_t buffer_index = scope_dma_queue.order[scope_dma_queue.tail];
+        scope_dma_queue.tail = (uint8_t)((scope_dma_queue.tail + 1U) % SCOPE_DMA_BUFFER_COUNT);
+        scope_dma_queue.pending--;
+        buffer = adc_dma_buf[buffer_index];
+    }
+
+    if (scope_dma_queue.pending == 0U)
+    {
+        scope_frame_ready = 0U;
+    }
+
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    return buffer;
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
