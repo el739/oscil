@@ -212,7 +212,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         Scope_RequestAutoSet();
 	}
 }
-/* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_Scope_DmaEnqueueBuffer */
 /**
@@ -268,6 +267,7 @@ static uint16_t *Scope_DmaDequeueBuffer(void)
 
     return buffer;
 }
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
