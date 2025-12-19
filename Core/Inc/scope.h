@@ -13,6 +13,8 @@ enum { SCOPE_FRAME_SAMPLES = ILI9341_WIDTH };
 void Scope_Init(void);
 void Scope_ProcessFrame(uint16_t *samples, uint16_t count);
 void Scope_RequestAutoSet(void);
+void Scope_RequestMoreCycles(void);
+void Scope_RequestFewerCycles(void);
 uint16_t Scope_FrameSampleCount(void);
 
 #ifdef __cplusplus

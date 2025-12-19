@@ -28,6 +28,8 @@ static const ScopeConfig scope_cfg = {
 typedef struct
 {
     volatile uint8_t autoset_request;
+    volatile uint8_t zoom_out_requests;
+    volatile uint8_t zoom_in_requests;
 } ScopeControlFlags;
 
 static ScopeDisplaySettings scope_display_settings;
@@ -39,6 +41,9 @@ static void Scope_UpdateHorizontalWindow(uint32_t span_samples);
 static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples);
 static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len);
 static uint8_t Scope_ConsumeAutoSetRequest(void);
+static void Scope_ApplyHorizontalScaleRequests(void);
+static void Scope_ZoomHorizontal(uint8_t zoom_in);
+static void Scope_QueueZoomRequest(volatile uint8_t *request_counter);
 
 uint16_t Scope_FrameSampleCount(void)
 {
@@ -79,6 +84,8 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
         Scope_ApplyAutoSet(samples, count);
     }
 
+    Scope_ApplyHorizontalScaleRequests();
+
     uint16_t visible_samples = Scope_GetVisibleSampleCount(count);
     ScopeDisplay_DrawWaveform(&scope_display_settings,
                               samples,
@@ -90,6 +97,16 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
 void Scope_RequestAutoSet(void)
 {
     scope_control.autoset_request = 1U;
+}
+
+void Scope_RequestMoreCycles(void)
+{
+    Scope_QueueZoomRequest(&scope_control.zoom_out_requests);
+}
+
+void Scope_RequestFewerCycles(void)
+{
+    Scope_QueueZoomRequest(&scope_control.zoom_in_requests);
 }
 
 static uint8_t Scope_ConsumeAutoSetRequest(void)
@@ -189,6 +206,91 @@ static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples)
     }
 
     return visible;
+}
+
+static void Scope_ApplyHorizontalScaleRequests(void)
+{
+    uint8_t zoom_out = 0U;
+    uint8_t zoom_in = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    zoom_out = scope_control.zoom_out_requests;
+    zoom_in = scope_control.zoom_in_requests;
+    scope_control.zoom_out_requests = 0U;
+    scope_control.zoom_in_requests = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    while (zoom_out != 0U)
+    {
+        Scope_ZoomHorizontal(0U);
+        zoom_out--;
+    }
+
+    while (zoom_in != 0U)
+    {
+        Scope_ZoomHorizontal(1U);
+        zoom_in--;
+    }
+}
+
+static void Scope_ZoomHorizontal(uint8_t zoom_in)
+{
+    uint32_t span = scope_display_settings.horizontal.samples_visible;
+    if (span == 0U)
+    {
+        span = scope_cfg.samples_per_frame;
+    }
+
+    if (zoom_in)
+    {
+        if (span > 2U)
+        {
+            span /= 2U;
+        }
+        else
+        {
+            span = 2U;
+        }
+    }
+    else
+    {
+        if (span < scope_cfg.samples_per_frame)
+        {
+            span *= 2U;
+            if (span > scope_cfg.samples_per_frame)
+            {
+                span = scope_cfg.samples_per_frame;
+            }
+        }
+        else
+        {
+            span = scope_cfg.samples_per_frame;
+        }
+    }
+
+    Scope_UpdateHorizontalWindow(span);
+}
+
+static void Scope_QueueZoomRequest(volatile uint8_t *request_counter)
+{
+    if (request_counter == NULL)
+    {
+        return;
+    }
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (*request_counter < 0xFFU)
+    {
+        (*request_counter)++;
+    }
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
 }
 
 static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)

@@ -205,12 +205,19 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-	if (GPIO_Pin == GPIO_PIN_13)
-	{
-    /* Toggle LED1 */
-		HAL_GPIO_TogglePin(LD2_GPIO_Port,LD2_Pin);
+    if (GPIO_Pin == USER_Btn_Pin)
+    {
+        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
         Scope_RequestAutoSet();
-	}
+    }
+    else if (GPIO_Pin == K1_Pin)
+    {
+        Scope_RequestMoreCycles();
+    }
+    else if (GPIO_Pin == K2_Pin)
+    {
+        Scope_RequestFewerCycles();
+    }
 }
 
 /* USER CODE BEGIN Header_Scope_DmaEnqueueBuffer */
