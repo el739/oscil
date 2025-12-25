@@ -131,15 +131,6 @@ void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
     }
 
     int32_t center_sample = settings->horizontal.center_sample;
-    if (center_sample < 0)
-    {
-        center_sample = 0;
-    }
-    if (center_sample >= (int32_t)visible_samples)
-    {
-        center_sample = (int32_t)(visible_samples / 2U);
-    }
-
     int32_t start_offset = (int32_t)trig - center_sample;
     int32_t samples_in_frame = (int32_t)count;
 

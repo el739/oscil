@@ -17,6 +17,8 @@ void Scope_RequestMoreCycles(void);
 void Scope_RequestFewerCycles(void);
 void Scope_RequestMoreVoltageScale(void);
 void Scope_RequestLessVoltageScale(void);
+void Scope_RequestOffsetDecrease(void);
+void Scope_RequestOffsetIncrease(void);
 uint16_t Scope_FrameSampleCount(void);
 
 #ifdef __cplusplus

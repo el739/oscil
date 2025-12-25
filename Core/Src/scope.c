@@ -32,6 +32,7 @@ typedef struct
     volatile uint8_t zoom_in_requests;
     volatile uint8_t v_zoom_out_requests;
     volatile uint8_t v_zoom_in_requests;
+    volatile int8_t offset_shift_requests;
 } ScopeControlFlags;
 
 static ScopeDisplaySettings scope_display_settings;
@@ -46,9 +47,13 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len);
 static uint8_t Scope_ConsumeAutoSetRequest(void);
 static void Scope_ApplyHorizontalScaleRequests(void);
 static void Scope_ApplyVerticalScaleRequests(void);
+static void Scope_ApplyOffsetRequests(void);
 static void Scope_ZoomHorizontal(uint8_t zoom_in);
 static void Scope_ZoomVertical(uint8_t zoom_in);
 static void Scope_QueueZoomRequest(volatile uint8_t *request_counter);
+static void Scope_RequestOffsetStep(int8_t direction);
+static void Scope_ShiftHorizontalOffset(int8_t steps);
+static void Scope_ShiftVerticalOffset(int8_t steps);
 
 uint16_t Scope_FrameSampleCount(void)
 {
@@ -91,6 +96,7 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
 
     Scope_ApplyHorizontalScaleRequests();
     Scope_ApplyVerticalScaleRequests();
+    Scope_ApplyOffsetRequests();
 
     uint16_t visible_samples = Scope_GetVisibleSampleCount(count);
     ScopeDisplay_DrawWaveform(&scope_display_settings,
@@ -123,6 +129,16 @@ void Scope_RequestMoreVoltageScale(void)
 void Scope_RequestLessVoltageScale(void)
 {
     Scope_QueueZoomRequest(&scope_control.v_zoom_in_requests);
+}
+
+void Scope_RequestOffsetDecrease(void)
+{
+    Scope_RequestOffsetStep(-1);
+}
+
+void Scope_RequestOffsetIncrease(void)
+{
+    Scope_RequestOffsetStep(1);
 }
 
 static uint8_t Scope_ConsumeAutoSetRequest(void)
@@ -309,6 +325,27 @@ static void Scope_ApplyVerticalScaleRequests(void)
     }
 }
 
+static void Scope_ApplyOffsetRequests(void)
+{
+    int8_t pending = 0;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    pending = scope_control.offset_shift_requests;
+    scope_control.offset_shift_requests = 0;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (pending == 0)
+    {
+        return;
+    }
+
+    Scope_ShiftHorizontalOffset(pending);
+    Scope_ShiftVerticalOffset(pending);
+}
+
 static void Scope_ZoomHorizontal(uint8_t zoom_in)
 {
     uint32_t span = scope_display_settings.horizontal.samples_visible;
@@ -407,6 +444,106 @@ static void Scope_QueueZoomRequest(volatile uint8_t *request_counter)
     {
         __enable_irq();
     }
+}
+
+static void Scope_RequestOffsetStep(int8_t direction)
+{
+    if (direction == 0)
+    {
+        return;
+    }
+
+    const int8_t max_pending = 64;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    int16_t pending = (int16_t)scope_control.offset_shift_requests + (int16_t)direction;
+    if (pending > max_pending)
+    {
+        pending = max_pending;
+    }
+    else if (pending < -max_pending)
+    {
+        pending = -max_pending;
+    }
+    scope_control.offset_shift_requests = (int8_t)pending;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static void Scope_ShiftHorizontalOffset(int8_t steps)
+{
+    if (steps == 0)
+    {
+        return;
+    }
+
+    uint32_t visible = scope_display_settings.horizontal.samples_visible;
+    uint32_t frame_samples = scope_cfg.samples_per_frame;
+    if (visible == 0U || frame_samples == 0U)
+    {
+        return;
+    }
+
+    int32_t delta = (int32_t)visible / 10;
+    if (delta == 0)
+    {
+        delta = 1;
+    }
+
+    int32_t center = scope_display_settings.horizontal.center_sample;
+    center += (int32_t)steps * delta;
+
+    int32_t limit = (int32_t)frame_samples * 2;
+    if (limit <= 0)
+    {
+        limit = (int32_t)frame_samples;
+    }
+    if (center > limit)
+    {
+        center = limit;
+    }
+    else if (center < -limit)
+    {
+        center = -limit;
+    }
+
+    scope_display_settings.horizontal.center_sample = center;
+}
+
+static void Scope_ShiftVerticalOffset(int8_t steps)
+{
+    if (steps == 0)
+    {
+        return;
+    }
+
+    uint32_t span = scope_display_settings.vertical.span_counts;
+    if (span == 0U)
+    {
+        span = scope_cfg.adc_max_counts;
+    }
+
+    int32_t delta = (int32_t)span / 10;
+    if (delta == 0)
+    {
+        delta = 1;
+    }
+
+    int32_t center = scope_display_settings.vertical.center_counts;
+    center -= (int32_t)steps * delta;
+
+    if (center < 0)
+    {
+        center = 0;
+    }
+    else if (center > (int32_t)scope_cfg.adc_max_counts)
+    {
+        center = (int32_t)scope_cfg.adc_max_counts;
+    }
+
+    scope_display_settings.vertical.center_counts = center;
 }
 
 static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)

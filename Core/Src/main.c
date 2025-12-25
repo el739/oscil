@@ -265,6 +265,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             Scope_RequestFewerCycles();
         }
     }
+    else if (GPIO_Pin == K3_Pin)
+    {
+        Scope_RequestOffsetDecrease();
+    }
+    else if (GPIO_Pin == K4_Pin)
+    {
+        Scope_RequestOffsetIncrease();
+    }
     else if (GPIO_Pin == K8_Pin)
     {
         if (scope_scale_target == SCOPE_SCALE_TARGET_VOLTAGE)
