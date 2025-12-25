@@ -394,6 +394,14 @@ static void ScopeDisplay_UpdateMeasurements(uint16_t vmin, uint16_t vmax, uint32
                  (unsigned long)freq_hz);
     }
 
+    ScopeScaleTarget target = Scope_GetScaleTarget();
+    const char *target_str = (target == SCOPE_SCALE_TARGET_VOLTAGE) ? "V" : "T";
+    size_t len = strlen(line3);
+    if (len < sizeof(line3))
+    {
+        snprintf(&line3[len], sizeof(line3) - len, " | Adj: %s", target_str);
+    }
+
     ScopeDisplay_UpdateInfoLine(4U, 4U, line1, ILI9341_YELLOW, last_line1, sizeof(last_line1));
     ScopeDisplay_UpdateInfoLine(4U, 24U, line2, ILI9341_GREEN, last_line2, sizeof(last_line2));
     ScopeDisplay_UpdateInfoLine(4U, 44U, line3, ILI9341_WHITE, last_line3, sizeof(last_line3));
