@@ -15,6 +15,8 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count);
 void Scope_RequestAutoSet(void);
 void Scope_RequestMoreCycles(void);
 void Scope_RequestFewerCycles(void);
+void Scope_RequestMoreVoltageScale(void);
+void Scope_RequestLessVoltageScale(void);
 uint16_t Scope_FrameSampleCount(void);
 
 #ifdef __cplusplus

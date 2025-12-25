@@ -30,6 +30,8 @@ typedef struct
     volatile uint8_t autoset_request;
     volatile uint8_t zoom_out_requests;
     volatile uint8_t zoom_in_requests;
+    volatile uint8_t v_zoom_out_requests;
+    volatile uint8_t v_zoom_in_requests;
 } ScopeControlFlags;
 
 static ScopeDisplaySettings scope_display_settings;
@@ -38,11 +40,14 @@ static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
 static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
 static void Scope_UpdateHorizontalWindow(uint32_t span_samples);
+static uint32_t Scope_MaxVerticalSpan(void);
 static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples);
 static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len);
 static uint8_t Scope_ConsumeAutoSetRequest(void);
 static void Scope_ApplyHorizontalScaleRequests(void);
+static void Scope_ApplyVerticalScaleRequests(void);
 static void Scope_ZoomHorizontal(uint8_t zoom_in);
+static void Scope_ZoomVertical(uint8_t zoom_in);
 static void Scope_QueueZoomRequest(volatile uint8_t *request_counter);
 
 uint16_t Scope_FrameSampleCount(void)
@@ -85,6 +90,7 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
     }
 
     Scope_ApplyHorizontalScaleRequests();
+    Scope_ApplyVerticalScaleRequests();
 
     uint16_t visible_samples = Scope_GetVisibleSampleCount(count);
     ScopeDisplay_DrawWaveform(&scope_display_settings,
@@ -107,6 +113,16 @@ void Scope_RequestMoreCycles(void)
 void Scope_RequestFewerCycles(void)
 {
     Scope_QueueZoomRequest(&scope_control.zoom_in_requests);
+}
+
+void Scope_RequestMoreVoltageScale(void)
+{
+    Scope_QueueZoomRequest(&scope_control.v_zoom_out_requests);
+}
+
+void Scope_RequestLessVoltageScale(void)
+{
+    Scope_QueueZoomRequest(&scope_control.v_zoom_in_requests);
 }
 
 static uint8_t Scope_ConsumeAutoSetRequest(void)
@@ -153,6 +169,15 @@ static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center)
     {
         center = scope_cfg.adc_max_counts;
     }
+    if (center < 0)
+    {
+        center = 0;
+    }
+    uint32_t max_span = Scope_MaxVerticalSpan();
+    if (span > max_span)
+    {
+        span = max_span;
+    }
     scope_display_settings.vertical.span_counts = span;
     scope_display_settings.vertical.center_counts = center;
 }
@@ -185,6 +210,26 @@ static void Scope_UpdateHorizontalWindow(uint32_t span_samples)
     scope_display_settings.horizontal.samples_visible = (uint16_t)span_samples;
     scope_display_settings.horizontal.center_sample =
         (int32_t)(scope_display_settings.horizontal.samples_visible / 2U);
+}
+
+static uint32_t Scope_MaxVerticalSpan(void)
+{
+    const uint32_t scale_factor = 8U;
+    uint32_t base_span = scope_cfg.adc_max_counts;
+    if (base_span == 0U)
+    {
+        base_span = 1U;
+    }
+    uint64_t scaled = (uint64_t)base_span * scale_factor;
+    if (scaled == 0U)
+    {
+        scaled = 1U;
+    }
+    if (scaled > 0xFFFFFFFFULL)
+    {
+        scaled = 0xFFFFFFFFULL;
+    }
+    return (uint32_t)scaled;
 }
 
 static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples)
@@ -236,6 +281,34 @@ static void Scope_ApplyHorizontalScaleRequests(void)
     }
 }
 
+static void Scope_ApplyVerticalScaleRequests(void)
+{
+    uint8_t zoom_out = 0U;
+    uint8_t zoom_in = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    zoom_out = scope_control.v_zoom_out_requests;
+    zoom_in = scope_control.v_zoom_in_requests;
+    scope_control.v_zoom_out_requests = 0U;
+    scope_control.v_zoom_in_requests = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    while (zoom_out != 0U)
+    {
+        Scope_ZoomVertical(0U);
+        zoom_out--;
+    }
+
+    while (zoom_in != 0U)
+    {
+        Scope_ZoomVertical(1U);
+        zoom_in--;
+    }
+}
+
 static void Scope_ZoomHorizontal(uint8_t zoom_in)
 {
     uint32_t span = scope_display_settings.horizontal.samples_visible;
@@ -272,6 +345,49 @@ static void Scope_ZoomHorizontal(uint8_t zoom_in)
     }
 
     Scope_UpdateHorizontalWindow(span);
+}
+
+static void Scope_ZoomVertical(uint8_t zoom_in)
+{
+    uint32_t span = scope_display_settings.vertical.span_counts;
+    uint32_t max_span = Scope_MaxVerticalSpan();
+    if (span == 0U)
+    {
+        span = scope_cfg.adc_max_counts;
+    }
+
+    if (zoom_in)
+    {
+        if (span > scope_cfg.trigger_min_delta)
+        {
+            span /= 2U;
+            if (span < scope_cfg.trigger_min_delta)
+            {
+                span = scope_cfg.trigger_min_delta;
+            }
+        }
+        else
+        {
+            span = scope_cfg.trigger_min_delta;
+        }
+    }
+    else
+    {
+        if (span < max_span)
+        {
+            span *= 2U;
+            if (span > max_span)
+            {
+                span = max_span;
+            }
+        }
+        else
+        {
+            span = max_span;
+        }
+    }
+
+    Scope_UpdateVerticalWindow(span, scope_display_settings.vertical.center_counts);
 }
 
 static void Scope_QueueZoomRequest(volatile uint8_t *request_counter)
