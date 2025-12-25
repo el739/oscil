@@ -4,6 +4,14 @@
 #include "scope_display.h"
 #include "scope_signal.h"
 
+enum
+{
+    VERTICAL_SCALE_MAX_FACTOR = 8U,
+    OFFSET_STEP_DIVISOR = 10U,
+    AUTOSET_MARGIN_PERCENT_NUMERATOR = 1U,
+    AUTOSET_MARGIN_PERCENT_DENOMINATOR = 5U
+};
+
 typedef struct
 {
     uint16_t samples_per_frame;
@@ -37,6 +45,7 @@ typedef struct
 
 static ScopeDisplaySettings scope_display_settings;
 static ScopeControlFlags scope_control = {0};
+static ScopeScaleTarget scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
 static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
 static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
@@ -141,6 +150,23 @@ void Scope_RequestOffsetIncrease(void)
     Scope_RequestOffsetStep(1);
 }
 
+void Scope_ToggleScaleTarget(void)
+{
+    if (scope_scale_target == SCOPE_SCALE_TARGET_VOLTAGE)
+    {
+        scope_scale_target = SCOPE_SCALE_TARGET_TIME;
+    }
+    else
+    {
+        scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
+    }
+}
+
+ScopeScaleTarget Scope_GetScaleTarget(void)
+{
+    return scope_scale_target;
+}
+
 static uint8_t Scope_ConsumeAutoSetRequest(void)
 {
     uint8_t pending;
@@ -230,13 +256,12 @@ static void Scope_UpdateHorizontalWindow(uint32_t span_samples)
 
 static uint32_t Scope_MaxVerticalSpan(void)
 {
-    const uint32_t scale_factor = 8U;
     uint32_t base_span = scope_cfg.adc_max_counts;
     if (base_span == 0U)
     {
         base_span = 1U;
     }
-    uint64_t scaled = (uint64_t)base_span * scale_factor;
+    uint64_t scaled = (uint64_t)base_span * VERTICAL_SCALE_MAX_FACTOR;
     if (scaled == 0U)
     {
         scaled = 1U;
@@ -269,16 +294,18 @@ static uint16_t Scope_GetVisibleSampleCount(uint16_t available_samples)
     return visible;
 }
 
-static void Scope_ApplyHorizontalScaleRequests(void)
+static void Scope_ConsumeAndApplyZoomRequests(volatile uint8_t *zoom_out_requests,
+                                               volatile uint8_t *zoom_in_requests,
+                                               void (*zoom_func)(uint8_t zoom_in))
 {
     uint8_t zoom_out = 0U;
     uint8_t zoom_in = 0U;
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    zoom_out = scope_control.zoom_out_requests;
-    zoom_in = scope_control.zoom_in_requests;
-    scope_control.zoom_out_requests = 0U;
-    scope_control.zoom_in_requests = 0U;
+    zoom_out = *zoom_out_requests;
+    zoom_in = *zoom_in_requests;
+    *zoom_out_requests = 0U;
+    *zoom_in_requests = 0U;
     if (primask == 0U)
     {
         __enable_irq();
@@ -286,43 +313,29 @@ static void Scope_ApplyHorizontalScaleRequests(void)
 
     while (zoom_out != 0U)
     {
-        Scope_ZoomHorizontal(0U);
+        zoom_func(0U);
         zoom_out--;
     }
 
     while (zoom_in != 0U)
     {
-        Scope_ZoomHorizontal(1U);
+        zoom_func(1U);
         zoom_in--;
     }
 }
 
+static void Scope_ApplyHorizontalScaleRequests(void)
+{
+    Scope_ConsumeAndApplyZoomRequests(&scope_control.zoom_out_requests,
+                                      &scope_control.zoom_in_requests,
+                                      Scope_ZoomHorizontal);
+}
+
 static void Scope_ApplyVerticalScaleRequests(void)
 {
-    uint8_t zoom_out = 0U;
-    uint8_t zoom_in = 0U;
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    zoom_out = scope_control.v_zoom_out_requests;
-    zoom_in = scope_control.v_zoom_in_requests;
-    scope_control.v_zoom_out_requests = 0U;
-    scope_control.v_zoom_in_requests = 0U;
-    if (primask == 0U)
-    {
-        __enable_irq();
-    }
-
-    while (zoom_out != 0U)
-    {
-        Scope_ZoomVertical(0U);
-        zoom_out--;
-    }
-
-    while (zoom_in != 0U)
-    {
-        Scope_ZoomVertical(1U);
-        zoom_in--;
-    }
+    Scope_ConsumeAndApplyZoomRequests(&scope_control.v_zoom_out_requests,
+                                      &scope_control.v_zoom_in_requests,
+                                      Scope_ZoomVertical);
 }
 
 static void Scope_ApplyOffsetRequests(void)
@@ -486,7 +499,7 @@ static void Scope_ShiftHorizontalOffset(int8_t steps)
         return;
     }
 
-    int32_t delta = (int32_t)visible / 10;
+    int32_t delta = (int32_t)visible / (int32_t)OFFSET_STEP_DIVISOR;
     if (delta == 0)
     {
         delta = 1;
@@ -525,7 +538,7 @@ static void Scope_ShiftVerticalOffset(int8_t steps)
         span = scope_cfg.adc_max_counts;
     }
 
-    int32_t delta = (int32_t)span / 10;
+    int32_t delta = (int32_t)span / (int32_t)OFFSET_STEP_DIVISOR;
     if (delta == 0)
     {
         delta = 1;
@@ -576,7 +589,7 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
         return;
     }
 
-    uint32_t margin_span = span + span / 5U;
+    uint32_t margin_span = span + (span * AUTOSET_MARGIN_PERCENT_NUMERATOR / AUTOSET_MARGIN_PERCENT_DENOMINATOR);
     if (margin_span == 0U)
     {
         margin_span = scope_cfg.trigger_min_delta;
