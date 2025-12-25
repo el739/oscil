@@ -28,6 +28,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <string.h>
 #include "scope.h"
 #include "scope_buffer.h"
 #include "input_handler.h"
@@ -50,6 +51,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static uint16_t scope_frame_copy[SCOPE_FRAME_SAMPLES];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -133,7 +135,15 @@ int main(void)
           uint16_t *ready_buf = ScopeBuffer_Dequeue(&samples_count);
           if (ready_buf != NULL)
           {
-              Scope_ProcessFrame(ready_buf, samples_count);
+              uint16_t samples_to_process = samples_count;
+              if (samples_to_process > SCOPE_FRAME_SAMPLES)
+              {
+                  samples_to_process = SCOPE_FRAME_SAMPLES;
+              }
+              memcpy(scope_frame_copy,
+                     ready_buf,
+                     (size_t)samples_to_process * sizeof(uint16_t));
+              Scope_ProcessFrame(scope_frame_copy, samples_to_process);
           }
       }
     /* USER CODE END WHILE */
