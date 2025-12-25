@@ -48,9 +48,19 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-enum { SCOPE_DMA_BUFFER_COUNT = 2U };
+enum
+{
+    SCOPE_DMA_BUFFER_COUNT = 2U,
+    BUTTON_DEBOUNCE_MS = 80U
+};
 
 static uint16_t adc_dma_buf[SCOPE_DMA_BUFFER_COUNT][SCOPE_FRAME_SAMPLES];
+
+typedef enum
+{
+    SCOPE_SCALE_TARGET_VOLTAGE = 0,
+    SCOPE_SCALE_TARGET_TIME
+} ScopeScaleTarget;
 
 typedef struct
 {
@@ -61,10 +71,28 @@ typedef struct
     uint32_t overruns;
 } ScopeDmaFrameQueue;
 
+typedef struct
+{
+    uint16_t gpio_pin;
+    uint32_t last_tick;
+} ButtonDebounceState;
+
 static ScopeDmaFrameQueue scope_dma_queue = {0};
 static volatile uint8_t scope_frame_ready = 0U;
 static void Scope_DmaEnqueueBuffer(uint8_t buffer_index);
 static uint16_t *Scope_DmaDequeueBuffer(void);
+static ScopeScaleTarget scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
+static uint8_t Scope_ButtonDebounced(uint16_t gpio_pin);
+static ButtonDebounceState button_debounce_states[] = {
+    {USER_Btn_Pin, 0U},
+    {K1_Pin, 0U},
+    {K2_Pin, 0U},
+    {K3_Pin, 0U},
+    {K4_Pin, 0U},
+    {K5_Pin, 0U},
+    {K6_Pin, 0U},
+    {K7_Pin, 0U},
+    {K8_Pin, 0U}};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -205,6 +233,11 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+    if (!Scope_ButtonDebounced(GPIO_Pin))
+    {
+        return;
+    }
+
     if (GPIO_Pin == USER_Btn_Pin)
     {
         HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
@@ -212,20 +245,69 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
     else if (GPIO_Pin == K1_Pin)
     {
-        Scope_RequestMoreCycles();
+        if (scope_scale_target == SCOPE_SCALE_TARGET_VOLTAGE)
+        {
+            Scope_RequestMoreVoltageScale();
+        }
+        else
+        {
+            Scope_RequestMoreCycles();
+        }
     }
     else if (GPIO_Pin == K2_Pin)
     {
-        Scope_RequestFewerCycles();
+        if (scope_scale_target == SCOPE_SCALE_TARGET_VOLTAGE)
+        {
+            Scope_RequestLessVoltageScale();
+        }
+        else
+        {
+            Scope_RequestFewerCycles();
+        }
     }
-    else if (GPIO_Pin == K3_Pin)
+    else if (GPIO_Pin == K8_Pin)
     {
-        Scope_RequestMoreVoltageScale();
+        if (scope_scale_target == SCOPE_SCALE_TARGET_VOLTAGE)
+        {
+            scope_scale_target = SCOPE_SCALE_TARGET_TIME;
+        }
+        else
+        {
+            scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
+        }
     }
-    else if (GPIO_Pin == K4_Pin)
+}
+
+static uint8_t Scope_ButtonDebounced(uint16_t gpio_pin)
+{
+    const uint32_t now = HAL_GetTick();
+    ButtonDebounceState *state = NULL;
+    const uint32_t state_count = (uint32_t)(sizeof(button_debounce_states) / sizeof(button_debounce_states[0]));
+
+    for (uint32_t idx = 0U; idx < state_count; idx++)
     {
-        Scope_RequestLessVoltageScale();
+        if (button_debounce_states[idx].gpio_pin == gpio_pin)
+        {
+            state = &button_debounce_states[idx];
+            break;
+        }
     }
+
+    if (state == NULL)
+    {
+        return 1U;
+    }
+
+    if (state->last_tick != 0U)
+    {
+        if ((now - state->last_tick) < BUTTON_DEBOUNCE_MS)
+        {
+            return 0U;
+        }
+    }
+
+    state->last_tick = now;
+    return 1U;
 }
 
 /* USER CODE BEGIN Header_Scope_DmaEnqueueBuffer */
