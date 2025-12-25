@@ -40,7 +40,8 @@ typedef struct
     volatile uint8_t zoom_in_requests;
     volatile uint8_t v_zoom_out_requests;
     volatile uint8_t v_zoom_in_requests;
-    volatile int8_t offset_shift_requests;
+    volatile int8_t horizontal_offset_shift_requests;
+    volatile int8_t vertical_offset_shift_requests;
 } ScopeControlFlags;
 
 static ScopeDisplaySettings scope_display_settings;
@@ -61,6 +62,7 @@ static void Scope_ZoomHorizontal(uint8_t zoom_in);
 static void Scope_ZoomVertical(uint8_t zoom_in);
 static void Scope_QueueZoomRequest(volatile uint8_t *request_counter);
 static void Scope_RequestOffsetStep(int8_t direction);
+static void Scope_QueueOffsetRequest(volatile int8_t *request_counter, int8_t direction);
 static void Scope_ShiftHorizontalOffset(int8_t steps);
 static void Scope_ShiftVerticalOffset(int8_t steps);
 
@@ -340,23 +342,28 @@ static void Scope_ApplyVerticalScaleRequests(void)
 
 static void Scope_ApplyOffsetRequests(void)
 {
-    int8_t pending = 0;
+    int8_t horizontal_pending = 0;
+    int8_t vertical_pending = 0;
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    pending = scope_control.offset_shift_requests;
-    scope_control.offset_shift_requests = 0;
+    horizontal_pending = scope_control.horizontal_offset_shift_requests;
+    vertical_pending = scope_control.vertical_offset_shift_requests;
+    scope_control.horizontal_offset_shift_requests = 0;
+    scope_control.vertical_offset_shift_requests = 0;
     if (primask == 0U)
     {
         __enable_irq();
     }
 
-    if (pending == 0)
+    if (horizontal_pending != 0)
     {
-        return;
+        Scope_ShiftHorizontalOffset(horizontal_pending);
     }
 
-    Scope_ShiftHorizontalOffset(pending);
-    Scope_ShiftVerticalOffset(pending);
+    if (vertical_pending != 0)
+    {
+        Scope_ShiftVerticalOffset(vertical_pending);
+    }
 }
 
 static void Scope_ZoomHorizontal(uint8_t zoom_in)
@@ -466,10 +473,26 @@ static void Scope_RequestOffsetStep(int8_t direction)
         return;
     }
 
+    volatile int8_t *queue = &scope_control.vertical_offset_shift_requests;
+    if (scope_scale_target == SCOPE_SCALE_TARGET_TIME)
+    {
+        queue = &scope_control.horizontal_offset_shift_requests;
+    }
+
+    Scope_QueueOffsetRequest(queue, direction);
+}
+
+static void Scope_QueueOffsetRequest(volatile int8_t *request_counter, int8_t direction)
+{
+    if (request_counter == NULL || direction == 0)
+    {
+        return;
+    }
+
     const int8_t max_pending = 64;
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    int16_t pending = (int16_t)scope_control.offset_shift_requests + (int16_t)direction;
+    int16_t pending = (int16_t)(*request_counter) + (int16_t)direction;
     if (pending > max_pending)
     {
         pending = max_pending;
@@ -478,7 +501,7 @@ static void Scope_RequestOffsetStep(int8_t direction)
     {
         pending = -max_pending;
     }
-    scope_control.offset_shift_requests = (int8_t)pending;
+    *request_counter = (int8_t)pending;
     if (primask == 0U)
     {
         __enable_irq();
