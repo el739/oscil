@@ -19,6 +19,21 @@ static uint16_t last_y_max[SCOPE_FRAME_SAMPLES];
 static uint16_t scope_column_buf[ILI9341_HEIGHT];
 static uint8_t first_draw = 1U;
 
+typedef enum
+{
+    SCOPE_DISPLAY_INFO_MODE_NONE = 0,
+    SCOPE_DISPLAY_INFO_MODE_MEASUREMENTS,
+    SCOPE_DISPLAY_INFO_MODE_CURSOR
+} ScopeDisplayInfoMode;
+
+static ScopeDisplayInfoMode scope_display_info_mode = SCOPE_DISPLAY_INFO_MODE_NONE;
+static char measurement_last_line1[32];
+static char measurement_last_line2[32];
+static char measurement_last_line3[32];
+static char cursor_last_line1[32];
+static char cursor_last_line2[32];
+static char cursor_last_line3[32];
+
 static inline uint16_t ScopeDisplay_InfoPanelHeight(void)
 {
     return scope_display_module.cfg.info_panel_height;
@@ -41,6 +56,9 @@ static void ScopeDisplay_UpdateInfoLine(uint16_t x, uint16_t y, const char *text
 static int64_t ScopeDisplay_SamplesToTimeNs(int32_t sample_index, uint32_t sample_rate_hz);
 static void ScopeDisplay_FormatTimeValue(char *buf, size_t len, int64_t time_ns);
 static void ScopeDisplay_FormatVoltageString(char *buf, size_t len, int32_t millivolt, uint8_t force_sign);
+static void ScopeDisplay_ClearInfoPanel(void);
+static void ScopeDisplay_ClearMeasurementInfoCache(void);
+static void ScopeDisplay_ClearCursorInfoCache(void);
 
 void ScopeDisplay_Init(const ScopeDisplayConfig *cfg)
 {
@@ -53,6 +71,9 @@ void ScopeDisplay_Init(const ScopeDisplayConfig *cfg)
     scope_display_module.cfg = *cfg;
     scope_display_module.initialized = 1U;
     first_draw = 1U;
+    scope_display_info_mode = SCOPE_DISPLAY_INFO_MODE_NONE;
+    ScopeDisplay_ClearMeasurementInfoCache();
+    ScopeDisplay_ClearCursorInfoCache();
 }
 
 void ScopeDisplay_DrawGrid(void)
@@ -373,14 +394,18 @@ void ScopeDisplay_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_h
         return;
     }
 
+    if (scope_display_info_mode != SCOPE_DISPLAY_INFO_MODE_MEASUREMENTS)
+    {
+        ScopeDisplay_ClearInfoPanel();
+        ScopeDisplay_ClearMeasurementInfoCache();
+        scope_display_info_mode = SCOPE_DISPLAY_INFO_MODE_MEASUREMENTS;
+    }
+
     ScopeDisplay_UpdateMeasurements(vmin, vmax, freq_hz);
 }
 
 static void ScopeDisplay_UpdateMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz)
 {
-    static char last_line1[32];
-    static char last_line2[32];
-    static char last_line3[32];
     char line1[32];
     char line2[32];
     char line3[32];
@@ -436,9 +461,24 @@ static void ScopeDisplay_UpdateMeasurements(uint16_t vmin, uint16_t vmax, uint32
         snprintf(&line3[len], sizeof(line3) - len, " | Adj: %s", target_str);
     }
 
-    ScopeDisplay_UpdateInfoLine(4U, 4U, line1, ILI9341_YELLOW, last_line1, sizeof(last_line1));
-    ScopeDisplay_UpdateInfoLine(4U, 24U, line2, ILI9341_GREEN, last_line2, sizeof(last_line2));
-    ScopeDisplay_UpdateInfoLine(4U, 44U, line3, ILI9341_WHITE, last_line3, sizeof(last_line3));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                4U,
+                                line1,
+                                ILI9341_YELLOW,
+                                measurement_last_line1,
+                                sizeof(measurement_last_line1));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                24U,
+                                line2,
+                                ILI9341_GREEN,
+                                measurement_last_line2,
+                                sizeof(measurement_last_line2));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                44U,
+                                line3,
+                                ILI9341_WHITE,
+                                measurement_last_line3,
+                                sizeof(measurement_last_line3));
 }
 
 static void ScopeDisplay_UpdateInfoLine(uint16_t x, uint16_t y, const char *text,
@@ -587,13 +627,16 @@ static void ScopeDisplay_FormatVoltageString(char *buf, size_t len, int32_t mill
 
 void ScopeDisplay_DrawCursorMeasurements(const ScopeDisplayCursorMeasurements *measurements)
 {
-    static char last_line1[32];
-    static char last_line2[32];
-    static char last_line3[32];
-
     if (!scope_display_module.initialized || measurements == NULL || measurements->count == 0U)
     {
         return;
+    }
+
+    if (scope_display_info_mode != SCOPE_DISPLAY_INFO_MODE_CURSOR)
+    {
+        ScopeDisplay_ClearInfoPanel();
+        ScopeDisplay_ClearCursorInfoCache();
+        scope_display_info_mode = SCOPE_DISPLAY_INFO_MODE_CURSOR;
     }
 
     char line1[32];
@@ -655,7 +698,46 @@ void ScopeDisplay_DrawCursorMeasurements(const ScopeDisplayCursorMeasurements *m
         snprintf(line3, sizeof(line3), "DT: --- | DV: ---");
     }
 
-    ScopeDisplay_UpdateInfoLine(4U, 4U, line1, ILI9341_WHITE, last_line1, sizeof(last_line1));
-    ScopeDisplay_UpdateInfoLine(4U, 24U, line2, ILI9341_WHITE, last_line2, sizeof(last_line2));
-    ScopeDisplay_UpdateInfoLine(4U, 44U, line3, ILI9341_WHITE, last_line3, sizeof(last_line3));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                4U,
+                                line1,
+                                ILI9341_WHITE,
+                                cursor_last_line1,
+                                sizeof(cursor_last_line1));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                24U,
+                                line2,
+                                ILI9341_WHITE,
+                                cursor_last_line2,
+                                sizeof(cursor_last_line2));
+    ScopeDisplay_UpdateInfoLine(4U,
+                                44U,
+                                line3,
+                                ILI9341_WHITE,
+                                cursor_last_line3,
+                                sizeof(cursor_last_line3));
+}
+
+static void ScopeDisplay_ClearInfoPanel(void)
+{
+    uint16_t panel_height = ScopeDisplay_InfoPanelHeight();
+    if (panel_height == 0U)
+    {
+        return;
+    }
+    ILI9341_FillRect(0U, 0U, ILI9341_WIDTH, panel_height, ILI9341_BLACK);
+}
+
+static void ScopeDisplay_ClearMeasurementInfoCache(void)
+{
+    measurement_last_line1[0] = '\0';
+    measurement_last_line2[0] = '\0';
+    measurement_last_line3[0] = '\0';
+}
+
+static void ScopeDisplay_ClearCursorInfoCache(void)
+{
+    cursor_last_line1[0] = '\0';
+    cursor_last_line2[0] = '\0';
+    cursor_last_line3[0] = '\0';
 }
