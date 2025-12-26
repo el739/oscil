@@ -4,6 +4,8 @@
 #include "scope_display.h"
 #include "scope_signal.h"
 
+#include <string.h>
+
 enum
 {
     VERTICAL_SCALE_MAX_FACTOR = 8U,
@@ -42,12 +44,40 @@ typedef struct
     volatile uint8_t v_zoom_in_requests;
     volatile int8_t horizontal_offset_shift_requests;
     volatile int8_t vertical_offset_shift_requests;
+    volatile uint8_t hold_toggle_request;
 } ScopeControlFlags;
+
+enum { SCOPE_CURSOR_COUNT = 2U };
+
+typedef struct
+{
+    uint16_t samples[SCOPE_FRAME_SAMPLES];
+    uint16_t column_map[SCOPE_FRAME_SAMPLES];
+    uint16_t sample_count;
+    uint16_t trigger_index;
+    uint16_t frame_min;
+    uint16_t frame_max;
+    uint32_t freq_hz;
+    uint8_t valid;
+} ScopeFrameSnapshot;
+
+typedef struct
+{
+    uint16_t columns[SCOPE_CURSOR_COUNT];
+    uint8_t selected;
+    uint8_t active;
+    volatile int8_t shift_requests;
+    volatile uint8_t select_toggle_request;
+} ScopeCursorState;
 
 static ScopeDisplaySettings scope_display_settings;
 static ScopeControlFlags scope_control = {0};
 static ScopeScaleTarget scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
 static volatile uint8_t scope_waveform_hold = 0U;
+static ScopeFrameSnapshot scope_live_frame = {0};
+static ScopeFrameSnapshot scope_hold_frame = {0};
+static ScopeCursorState scope_cursor_state = {0};
+static uint8_t scope_hold_render_pending = 0U;
 static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
 static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
@@ -66,6 +96,16 @@ static void Scope_RequestOffsetStep(int8_t direction);
 static void Scope_QueueOffsetRequest(volatile int8_t *request_counter, int8_t direction);
 static void Scope_ShiftHorizontalOffset(int8_t steps);
 static void Scope_ShiftVerticalOffset(int8_t steps);
+static void Scope_HandleHoldToggleRequest(void);
+static void Scope_SetHoldState(uint8_t enable);
+static uint8_t Scope_CopyLiveFrameToHold(void);
+static void Scope_DisableHoldState(void);
+static void Scope_InitCursorPositions(void);
+static void Scope_ApplyCursorRequests(void);
+static void Scope_MoveCursor(uint8_t cursor_index, int8_t steps);
+static void Scope_RenderHoldFrame(void);
+static void Scope_DrawCursorMeasurements(void);
+static uint16_t Scope_GetCursorColumnLimit(void);
 
 uint16_t Scope_FrameSampleCount(void)
 {
@@ -91,8 +131,19 @@ void Scope_Init(void)
 
 void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
 {
+    Scope_HandleHoldToggleRequest();
+
     if (samples == NULL || count == 0U)
     {
+        if (scope_waveform_hold)
+        {
+            Scope_ApplyCursorRequests();
+            if (scope_hold_render_pending)
+            {
+                Scope_RenderHoldFrame();
+                scope_hold_render_pending = 0U;
+            }
+        }
         return;
     }
 
@@ -103,6 +154,12 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
 
     if (scope_waveform_hold)
     {
+        Scope_ApplyCursorRequests();
+        if (scope_hold_render_pending)
+        {
+            Scope_RenderHoldFrame();
+            scope_hold_render_pending = 0U;
+        }
         return;
     }
 
@@ -115,12 +172,49 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
     Scope_ApplyVerticalScaleRequests();
     Scope_ApplyOffsetRequests();
 
+    uint16_t frame_min = 0U;
+    uint16_t frame_max = 0U;
+    uint16_t trig = ScopeSignal_FindTriggerIndex(samples,
+                                                 count,
+                                                 scope_cfg.trigger_min_delta,
+                                                 &frame_min,
+                                                 &frame_max);
+    uint32_t period_samples = ScopeSignal_EstimatePeriodSamples(samples,
+                                                                count,
+                                                                trig,
+                                                                frame_min,
+                                                                frame_max,
+                                                                scope_cfg.trigger_min_delta);
+    uint32_t freq_hz = 0U;
+    if (period_samples != 0U)
+    {
+        uint32_t sample_rate = ScopeSignal_GetSampleRateHz();
+        if (sample_rate != 0U)
+        {
+            freq_hz = sample_rate / period_samples;
+        }
+    }
+
     uint16_t visible_samples = Scope_GetVisibleSampleCount(count);
     ScopeDisplay_DrawWaveform(&scope_display_settings,
                               samples,
                               count,
                               visible_samples,
-                              scope_cfg.trigger_min_delta);
+                              trig,
+                              NULL,
+                              scope_live_frame.column_map);
+    ScopeDisplay_DrawMeasurements(frame_min, frame_max, freq_hz);
+
+    if (count != 0U)
+    {
+        memcpy(scope_live_frame.samples, samples, (size_t)count * sizeof(uint16_t));
+    }
+    scope_live_frame.sample_count = count;
+    scope_live_frame.trigger_index = trig;
+    scope_live_frame.frame_min = frame_min;
+    scope_live_frame.frame_max = frame_max;
+    scope_live_frame.freq_hz = freq_hz;
+    scope_live_frame.valid = 1U;
 }
 
 void Scope_RequestAutoSet(void)
@@ -179,7 +273,7 @@ void Scope_ToggleWaveformHold(void)
 {
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    scope_waveform_hold = (uint8_t)(!scope_waveform_hold);
+    scope_control.hold_toggle_request = 1U;
     if (primask == 0U)
     {
         __enable_irq();
@@ -189,6 +283,48 @@ void Scope_ToggleWaveformHold(void)
 uint8_t Scope_IsWaveformHoldEnabled(void)
 {
     return scope_waveform_hold;
+}
+
+void Scope_RequestCursorShift(int8_t direction)
+{
+    if (direction == 0 || !Scope_IsWaveformHoldEnabled())
+    {
+        return;
+    }
+
+    const int8_t max_pending = 64;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    int16_t pending = (int16_t)scope_cursor_state.shift_requests + (int16_t)direction;
+    if (pending > max_pending)
+    {
+        pending = max_pending;
+    }
+    else if (pending < -max_pending)
+    {
+        pending = -max_pending;
+    }
+    scope_cursor_state.shift_requests = (int8_t)pending;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+void Scope_RequestCursorSelectNext(void)
+{
+    if (!Scope_IsWaveformHoldEnabled())
+    {
+        return;
+    }
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    scope_cursor_state.select_toggle_request = 1U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
 }
 
 static uint8_t Scope_ConsumeAutoSetRequest(void)
@@ -662,4 +798,258 @@ static void Scope_ApplyAutoSet(uint16_t *buf, uint16_t len)
         }
         Scope_UpdateHorizontalWindow(span_samples);
     }
+}
+
+static void Scope_HandleHoldToggleRequest(void)
+{
+    uint8_t pending = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    pending = scope_control.hold_toggle_request;
+    scope_control.hold_toggle_request = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (pending != 0U)
+    {
+        Scope_SetHoldState((uint8_t)(!scope_waveform_hold));
+    }
+}
+
+static void Scope_SetHoldState(uint8_t enable)
+{
+    if (enable)
+    {
+        if (!Scope_CopyLiveFrameToHold())
+        {
+            scope_waveform_hold = 0U;
+            return;
+        }
+        scope_waveform_hold = 1U;
+        Scope_InitCursorPositions();
+        scope_hold_render_pending = 1U;
+    }
+    else
+    {
+        Scope_DisableHoldState();
+        scope_waveform_hold = 0U;
+    }
+}
+
+static uint8_t Scope_CopyLiveFrameToHold(void)
+{
+    if (!scope_live_frame.valid || scope_live_frame.sample_count == 0U)
+    {
+        return 0U;
+    }
+
+    size_t sample_bytes = (size_t)scope_live_frame.sample_count * sizeof(uint16_t);
+    memcpy(scope_hold_frame.samples, scope_live_frame.samples, sample_bytes);
+    memcpy(scope_hold_frame.column_map,
+           scope_live_frame.column_map,
+           sizeof(scope_live_frame.column_map));
+    scope_hold_frame.sample_count = scope_live_frame.sample_count;
+    scope_hold_frame.trigger_index = scope_live_frame.trigger_index;
+    scope_hold_frame.frame_min = scope_live_frame.frame_min;
+    scope_hold_frame.frame_max = scope_live_frame.frame_max;
+    scope_hold_frame.freq_hz = scope_live_frame.freq_hz;
+    scope_hold_frame.valid = 1U;
+    return 1U;
+}
+
+static void Scope_DisableHoldState(void)
+{
+    scope_hold_frame.valid = 0U;
+    scope_cursor_state.active = 0U;
+    scope_cursor_state.selected = 0U;
+    scope_cursor_state.shift_requests = 0;
+    scope_cursor_state.select_toggle_request = 0U;
+    scope_hold_render_pending = 0U;
+}
+
+static void Scope_InitCursorPositions(void)
+{
+    uint16_t limit = Scope_GetCursorColumnLimit();
+    if (limit == 0U)
+    {
+        limit = 1U;
+    }
+
+    scope_cursor_state.columns[0] = limit / 3U;
+    scope_cursor_state.columns[1] = (uint16_t)((2U * limit) / 3U);
+
+    if (scope_cursor_state.columns[0] >= limit)
+    {
+        scope_cursor_state.columns[0] = limit - 1U;
+    }
+    if (scope_cursor_state.columns[1] >= limit)
+    {
+        scope_cursor_state.columns[1] = limit - 1U;
+    }
+
+    scope_cursor_state.selected = 0U;
+    scope_cursor_state.shift_requests = 0;
+    scope_cursor_state.select_toggle_request = 0U;
+    scope_cursor_state.active = 1U;
+}
+
+static void Scope_ApplyCursorRequests(void)
+{
+    int8_t shift = 0;
+    uint8_t toggle = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    shift = scope_cursor_state.shift_requests;
+    scope_cursor_state.shift_requests = 0;
+    toggle = scope_cursor_state.select_toggle_request;
+    scope_cursor_state.select_toggle_request = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (!scope_waveform_hold || !scope_hold_frame.valid || !scope_cursor_state.active)
+    {
+        return;
+    }
+
+    uint8_t updated = 0U;
+    if (toggle != 0U)
+    {
+        scope_cursor_state.selected++;
+        if (scope_cursor_state.selected >= SCOPE_CURSOR_COUNT)
+        {
+            scope_cursor_state.selected = 0U;
+        }
+        updated = 1U;
+    }
+
+    if (shift != 0)
+    {
+        Scope_MoveCursor(scope_cursor_state.selected, shift);
+        updated = 1U;
+    }
+
+    if (updated)
+    {
+        scope_hold_render_pending = 1U;
+    }
+}
+
+static void Scope_MoveCursor(uint8_t cursor_index, int8_t steps)
+{
+    if (cursor_index >= SCOPE_CURSOR_COUNT || steps == 0)
+    {
+        return;
+    }
+
+    int32_t column = scope_cursor_state.columns[cursor_index];
+    int32_t limit = (int32_t)Scope_GetCursorColumnLimit();
+    if (limit <= 0)
+    {
+        return;
+    }
+
+    column += (int32_t)steps;
+    if (column < 0)
+    {
+        column = 0;
+    }
+    else if (column >= limit)
+    {
+        column = limit - 1;
+    }
+
+    scope_cursor_state.columns[cursor_index] = (uint16_t)column;
+}
+
+static void Scope_RenderHoldFrame(void)
+{
+    if (!scope_waveform_hold || !scope_hold_frame.valid)
+    {
+        return;
+    }
+
+    ScopeDisplayCursorRenderInfo cursor_info = {0};
+    if (scope_cursor_state.active)
+    {
+        cursor_info.count = SCOPE_CURSOR_COUNT;
+        cursor_info.selected_index = scope_cursor_state.selected;
+        for (uint8_t idx = 0U; idx < SCOPE_CURSOR_COUNT; idx++)
+        {
+            uint16_t limit = Scope_GetCursorColumnLimit();
+            uint16_t column = scope_cursor_state.columns[idx];
+            if (limit != 0U && column >= limit)
+            {
+                column = limit - 1U;
+            }
+            cursor_info.columns[idx] = column;
+        }
+    }
+
+    uint16_t visible_samples = Scope_GetVisibleSampleCount(scope_hold_frame.sample_count);
+    ScopeDisplay_DrawWaveform(&scope_display_settings,
+                              scope_hold_frame.samples,
+                              scope_hold_frame.sample_count,
+                              visible_samples,
+                              scope_hold_frame.trigger_index,
+                              (cursor_info.count > 0U) ? &cursor_info : NULL,
+                              scope_hold_frame.column_map);
+
+    if (scope_cursor_state.active)
+    {
+        Scope_DrawCursorMeasurements();
+    }
+    else
+    {
+        ScopeDisplay_DrawMeasurements(scope_hold_frame.frame_min,
+                                      scope_hold_frame.frame_max,
+                                      scope_hold_frame.freq_hz);
+    }
+}
+
+static void Scope_DrawCursorMeasurements(void)
+{
+    if (!scope_hold_frame.valid || scope_hold_frame.sample_count == 0U)
+    {
+        return;
+    }
+
+    ScopeDisplayCursorMeasurements measurements = {0};
+    measurements.count = SCOPE_CURSOR_COUNT;
+    measurements.sample_rate_hz = ScopeSignal_GetSampleRateHz();
+    uint16_t limit = Scope_GetCursorColumnLimit();
+    if (limit == 0U)
+    {
+        return;
+    }
+
+    for (uint8_t idx = 0U; idx < SCOPE_CURSOR_COUNT; idx++)
+    {
+        uint16_t column = scope_cursor_state.columns[idx];
+        if (column >= limit)
+        {
+            column = limit - 1U;
+        }
+        uint16_t sample_idx = scope_hold_frame.column_map[column];
+        if (sample_idx >= scope_hold_frame.sample_count)
+        {
+            sample_idx = scope_hold_frame.sample_count - 1U;
+        }
+        measurements.sample_indices[idx] = sample_idx;
+        measurements.sample_values[idx] = scope_hold_frame.samples[sample_idx];
+    }
+
+    ScopeDisplay_DrawCursorMeasurements(&measurements);
+}
+
+static uint16_t Scope_GetCursorColumnLimit(void)
+{
+    if (scope_cfg.samples_per_frame == 0U)
+    {
+        return 0U;
+    }
+    return scope_cfg.samples_per_frame;
 }

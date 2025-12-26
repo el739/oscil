@@ -34,9 +34,13 @@ static int32_t ScopeDisplay_SampleToY(const ScopeDisplaySettings *settings, int3
 static uint8_t ScopeDisplay_ClipWaveformSegment(int32_t *y0, int32_t *y1);
 static void ScopeDisplay_EraseColumn(uint16_t x, uint16_t y0, uint16_t y1);
 static void ScopeDisplay_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1);
+static void ScopeDisplay_DrawCursorLine(uint16_t x, uint16_t color);
 static void ScopeDisplay_UpdateMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz);
 static void ScopeDisplay_UpdateInfoLine(uint16_t x, uint16_t y, const char *text,
                                         uint16_t color, char *last_text, size_t buf_len);
+static int64_t ScopeDisplay_SamplesToTimeNs(int32_t sample_index, uint32_t sample_rate_hz);
+static void ScopeDisplay_FormatTimeValue(char *buf, size_t len, int64_t time_ns);
+static void ScopeDisplay_FormatVoltageString(char *buf, size_t len, int32_t millivolt, uint8_t force_sign);
 
 void ScopeDisplay_Init(const ScopeDisplayConfig *cfg)
 {
@@ -94,7 +98,9 @@ void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
                                uint16_t *samples,
                                uint16_t count,
                                uint16_t visible_samples,
-                               uint16_t trigger_min_delta)
+                               uint16_t trigger_index,
+                               const ScopeDisplayCursorRenderInfo *cursor_info,
+                               uint16_t *column_sample_map)
 {
     if (!scope_display_module.initialized ||
         settings == NULL ||
@@ -109,29 +115,13 @@ void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
     {
         count = scope_display_module.cfg.frame_samples;
     }
-
-    uint16_t frame_min = 0;
-    uint16_t frame_max = 0;
-    uint16_t trig = ScopeSignal_FindTriggerIndex(samples, count, trigger_min_delta,
-                                                 &frame_min, &frame_max);
-    uint32_t period_samples = ScopeSignal_EstimatePeriodSamples(samples,
-                                                                count,
-                                                                trig,
-                                                                frame_min,
-                                                                frame_max,
-                                                                trigger_min_delta);
-    uint32_t freq_hz = 0U;
-    if (period_samples != 0U)
+    if (trigger_index >= count)
     {
-        uint32_t sample_rate = ScopeSignal_GetSampleRateHz();
-        if (sample_rate != 0U)
-        {
-            freq_hz = sample_rate / period_samples;
-        }
+        trigger_index = 0U;
     }
 
     int32_t center_sample = settings->horizontal.center_sample;
-    int32_t start_offset = (int32_t)trig - center_sample;
+    int32_t start_offset = (int32_t)trigger_index - center_sample;
     int32_t samples_in_frame = (int32_t)count;
 
     uint16_t draw_width = scope_display_module.cfg.frame_samples;
@@ -162,6 +152,10 @@ void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
             val = scope_display_module.cfg.adc_max_counts;
         }
         new_y[i] = ScopeDisplay_SampleToY(settings, (int32_t)val);
+        if (column_sample_map != NULL)
+        {
+            column_sample_map[i] = idx;
+        }
     }
 
     for (uint16_t x = 0; x < draw_width; x++)
@@ -198,8 +192,29 @@ void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
         last_y_max[x] = ymax_new;
     }
 
+    if (cursor_info != NULL && cursor_info->count > 0U)
+    {
+        for (uint8_t cursor_idx = 0U; cursor_idx < cursor_info->count; cursor_idx++)
+        {
+            uint16_t column = cursor_info->columns[cursor_idx];
+            if (column >= draw_width)
+            {
+                continue;
+            }
+            uint16_t color = (cursor_idx == cursor_info->selected_index) ? ILI9341_CYAN
+                                                                        : ILI9341_MAGENTA;
+            ScopeDisplay_DrawCursorLine(column, color);
+            uint16_t top = ScopeDisplay_InfoPanelHeight();
+            uint16_t bottom = ILI9341_HEIGHT - 1U;
+            if (column < ILI9341_WIDTH)
+            {
+                last_y_min[column] = top;
+                last_y_max[column] = bottom;
+            }
+        }
+    }
+
     first_draw = 0U;
-    ScopeDisplay_UpdateMeasurements(frame_min, frame_max, freq_hz);
 }
 
 static int32_t ScopeDisplay_SampleToY(const ScopeDisplaySettings *settings, int32_t sample)
@@ -332,6 +347,25 @@ static void ScopeDisplay_DrawColumn(uint16_t x, uint16_t y0, uint16_t y1)
     ILI9341_DrawColorSpan(x, y0, span, scope_display_module.cfg.waveform_color);
 }
 
+static void ScopeDisplay_DrawCursorLine(uint16_t x, uint16_t color)
+{
+    if (x >= ILI9341_WIDTH)
+    {
+        return;
+    }
+    uint16_t y0 = ScopeDisplay_InfoPanelHeight();
+    if (y0 >= ILI9341_HEIGHT)
+    {
+        return;
+    }
+    uint16_t span = ILI9341_HEIGHT - y0;
+    if (span == 0U)
+    {
+        return;
+    }
+    ILI9341_DrawColorSpan(x, y0, span, color);
+}
+
 void ScopeDisplay_DrawMeasurements(uint16_t vmin, uint16_t vmax, uint32_t freq_hz)
 {
     if (!scope_display_module.initialized)
@@ -437,4 +471,191 @@ static void ScopeDisplay_UpdateInfoLine(uint16_t x, uint16_t y, const char *text
 
     strncpy(last_text, text, buf_len);
     last_text[buf_len - 1U] = '\0';
+}
+
+static int64_t ScopeDisplay_SamplesToTimeNs(int32_t sample_index, uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0U)
+    {
+        return 0;
+    }
+    return ((int64_t)sample_index * 1000000000LL) / (int32_t)sample_rate_hz;
+}
+
+static void ScopeDisplay_FormatTimeValue(char *buf, size_t len, int64_t time_ns)
+{
+    if (buf == NULL || len == 0U)
+    {
+        return;
+    }
+    uint8_t negative = 0U;
+    if (time_ns < 0)
+    {
+        negative = 1U;
+        time_ns = -time_ns;
+    }
+
+    const uint64_t ONE_SECOND = 1000000000ULL;
+    const uint64_t ONE_MILLISECOND = 1000000ULL;
+    const uint64_t ONE_MICROSECOND = 1000ULL;
+
+    if ((uint64_t)time_ns >= ONE_SECOND)
+    {
+        uint64_t whole = (uint64_t)time_ns / ONE_SECOND;
+        uint64_t frac = ((uint64_t)time_ns % ONE_SECOND) / 1000000ULL;
+        snprintf(buf,
+                 len,
+                 "%s%lu.%03lu s",
+                 negative ? "-" : "",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+    else if ((uint64_t)time_ns >= ONE_MILLISECOND)
+    {
+        uint64_t whole = (uint64_t)time_ns / ONE_MILLISECOND;
+        uint64_t frac = ((uint64_t)time_ns % ONE_MILLISECOND) / 1000ULL;
+        snprintf(buf,
+                 len,
+                 "%s%lu.%03lu ms",
+                 negative ? "-" : "",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+    else if ((uint64_t)time_ns >= ONE_MICROSECOND)
+    {
+        uint64_t whole = (uint64_t)time_ns / ONE_MICROSECOND;
+        uint64_t frac = ((uint64_t)time_ns % ONE_MICROSECOND);
+        snprintf(buf,
+                 len,
+                 "%s%lu.%03lu us",
+                 negative ? "-" : "",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+    else
+    {
+        snprintf(buf,
+                 len,
+                 "%s%llu ns",
+                 negative ? "-" : "",
+                 (unsigned long long)time_ns);
+    }
+}
+
+static void ScopeDisplay_FormatVoltageString(char *buf, size_t len, int32_t millivolt, uint8_t force_sign)
+{
+    if (buf == NULL || len == 0U)
+    {
+        return;
+    }
+
+    uint8_t negative = 0U;
+    if (millivolt < 0)
+    {
+        negative = 1U;
+        millivolt = -millivolt;
+    }
+
+    uint32_t whole = (uint32_t)millivolt / 1000U;
+    uint32_t frac = ((uint32_t)millivolt % 1000U) / 10U;
+
+    if (negative)
+    {
+        snprintf(buf,
+                 len,
+                 "-%lu.%02lu V",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+    else if (force_sign)
+    {
+        snprintf(buf,
+                 len,
+                 "+%lu.%02lu V",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+    else
+    {
+        snprintf(buf,
+                 len,
+                 "%lu.%02lu V",
+                 (unsigned long)whole,
+                 (unsigned long)frac);
+    }
+}
+
+void ScopeDisplay_DrawCursorMeasurements(const ScopeDisplayCursorMeasurements *measurements)
+{
+    static char last_line1[32];
+    static char last_line2[32];
+    static char last_line3[32];
+
+    if (!scope_display_module.initialized || measurements == NULL || measurements->count == 0U)
+    {
+        return;
+    }
+
+    char line1[32];
+    char line2[32];
+    char line3[32];
+    char t_buf[2][16];
+    char v_buf[2][16];
+    char dt_buf[16];
+    char dv_buf[16];
+
+    for (uint8_t idx = 0U; idx < 2U; idx++)
+    {
+        snprintf(t_buf[idx], sizeof(t_buf[idx]), "---");
+        snprintf(v_buf[idx], sizeof(v_buf[idx]), "---");
+    }
+    snprintf(dt_buf, sizeof(dt_buf), "---");
+    snprintf(dv_buf, sizeof(dv_buf), "---");
+
+    for (uint8_t idx = 0U; idx < measurements->count && idx < 2U; idx++)
+    {
+        uint32_t mv = ScopeSignal_AdcToMillivolt(measurements->sample_values[idx],
+                                                 scope_display_module.cfg.adc_max_counts,
+                                                 scope_display_module.cfg.adc_ref_millivolt);
+        ScopeDisplay_FormatVoltageString(v_buf[idx], sizeof(v_buf[idx]), (int32_t)mv, 0U);
+
+        int32_t sample_idx = (int32_t)measurements->sample_indices[idx];
+        int64_t t_ns = ScopeDisplay_SamplesToTimeNs(sample_idx,
+                                                    measurements->sample_rate_hz);
+        ScopeDisplay_FormatTimeValue(t_buf[idx], sizeof(t_buf[idx]), t_ns);
+    }
+
+    if (measurements->count >= 2U)
+    {
+        int32_t sample_delta = (int32_t)measurements->sample_indices[0] -
+                               (int32_t)measurements->sample_indices[1];
+        int64_t delta_ns = ScopeDisplay_SamplesToTimeNs(sample_delta,
+                                                        measurements->sample_rate_hz);
+        ScopeDisplay_FormatTimeValue(dt_buf, sizeof(dt_buf), delta_ns);
+
+        uint32_t mv1 = ScopeSignal_AdcToMillivolt(measurements->sample_values[0],
+                                                  scope_display_module.cfg.adc_max_counts,
+                                                  scope_display_module.cfg.adc_ref_millivolt);
+        uint32_t mv2 = ScopeSignal_AdcToMillivolt(measurements->sample_values[1],
+                                                  scope_display_module.cfg.adc_max_counts,
+                                                  scope_display_module.cfg.adc_ref_millivolt);
+        int32_t delta_mv = (int32_t)mv1 - (int32_t)mv2;
+        ScopeDisplay_FormatVoltageString(dv_buf, sizeof(dv_buf), delta_mv, 1U);
+    }
+
+    snprintf(line1, sizeof(line1), "T1:%s | V1:%s", t_buf[0], v_buf[0]);
+    snprintf(line2, sizeof(line2), "T2:%s | V2:%s", t_buf[1], v_buf[1]);
+
+    if (measurements->count >= 2U)
+    {
+        snprintf(line3, sizeof(line3), "DT:%s | DV:%s", dt_buf, dv_buf);
+    }
+    else
+    {
+        snprintf(line3, sizeof(line3), "DT: --- | DV: ---");
+    }
+
+    ScopeDisplay_UpdateInfoLine(4U, 4U, line1, ILI9341_WHITE, last_line1, sizeof(last_line1));
+    ScopeDisplay_UpdateInfoLine(4U, 24U, line2, ILI9341_WHITE, last_line2, sizeof(last_line2));
+    ScopeDisplay_UpdateInfoLine(4U, 44U, line3, ILI9341_WHITE, last_line3, sizeof(last_line3));
 }

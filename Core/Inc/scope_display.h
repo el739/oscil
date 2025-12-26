@@ -37,14 +37,33 @@ typedef struct
 
 void ScopeDisplay_Init(const ScopeDisplayConfig *cfg);
 void ScopeDisplay_DrawGrid(void);
+
+typedef struct
+{
+    uint8_t count;
+    uint16_t columns[2];
+    uint8_t selected_index;
+} ScopeDisplayCursorRenderInfo;
+
+typedef struct
+{
+    uint32_t sample_rate_hz;
+    uint16_t sample_indices[2];
+    uint16_t sample_values[2];
+    uint8_t count;
+} ScopeDisplayCursorMeasurements;
+
 void ScopeDisplay_DrawWaveform(const ScopeDisplaySettings *settings,
                                uint16_t *samples,
                                uint16_t count,
                                uint16_t visible_samples,
-                               uint16_t trigger_min_delta);
+                               uint16_t trigger_index,
+                               const ScopeDisplayCursorRenderInfo *cursor_info,
+                               uint16_t *column_sample_map);
 void ScopeDisplay_DrawMeasurements(uint16_t vmin,
                                    uint16_t vmax,
                                    uint32_t freq_hz);
+void ScopeDisplay_DrawCursorMeasurements(const ScopeDisplayCursorMeasurements *measurements);
 
 #ifdef __cplusplus
 }

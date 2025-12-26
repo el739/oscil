@@ -30,6 +30,8 @@ ScopeScaleTarget Scope_GetScaleTarget(void);
 uint16_t Scope_FrameSampleCount(void);
 void Scope_ToggleWaveformHold(void);
 uint8_t Scope_IsWaveformHoldEnabled(void);
+void Scope_RequestCursorShift(int8_t direction);
+void Scope_RequestCursorSelectNext(void);
 
 #ifdef __cplusplus
 }
