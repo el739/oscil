@@ -28,6 +28,8 @@ void Scope_RequestOffsetIncrease(void);
 void Scope_ToggleScaleTarget(void);
 ScopeScaleTarget Scope_GetScaleTarget(void);
 uint16_t Scope_FrameSampleCount(void);
+void Scope_ToggleWaveformHold(void);
+uint8_t Scope_IsWaveformHoldEnabled(void);
 
 #ifdef __cplusplus
 }

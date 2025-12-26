@@ -47,6 +47,7 @@ typedef struct
 static ScopeDisplaySettings scope_display_settings;
 static ScopeControlFlags scope_control = {0};
 static ScopeScaleTarget scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
+static volatile uint8_t scope_waveform_hold = 0U;
 static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
 static void Scope_UpdateVerticalWindow(uint32_t span, int32_t center);
@@ -98,6 +99,11 @@ void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
     if (count > scope_cfg.samples_per_frame)
     {
         count = scope_cfg.samples_per_frame;
+    }
+
+    if (scope_waveform_hold)
+    {
+        return;
     }
 
     if (Scope_ConsumeAutoSetRequest())
@@ -167,6 +173,22 @@ void Scope_ToggleScaleTarget(void)
 ScopeScaleTarget Scope_GetScaleTarget(void)
 {
     return scope_scale_target;
+}
+
+void Scope_ToggleWaveformHold(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    scope_waveform_hold = (uint8_t)(!scope_waveform_hold);
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+uint8_t Scope_IsWaveformHoldEnabled(void)
+{
+    return scope_waveform_hold;
 }
 
 static uint8_t Scope_ConsumeAutoSetRequest(void)

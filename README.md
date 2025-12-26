@@ -78,5 +78,6 @@ Button presses (K1-K8) → `HAL_GPIO_EXTI_Callback()` → `InputHandler_ProcessG
 - **K2**: Zoom in (voltage or time, depending on scale target)
 - **K3**: Decrease offset (shift waveform down or left)
 - **K4**: Increase offset (shift waveform up or right)
-- **K5-K7**: Currently unmapped in `input_handler.c`
+- **K5-K6**: Currently unmapped in `input_handler.c`
+- **K7**: Toggle waveform hold (freeze display to keep the current waveform visible)
 - **K8**: Toggle scale target (voltage ↔ time)

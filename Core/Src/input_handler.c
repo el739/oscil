@@ -78,6 +78,10 @@ void InputHandler_ProcessGpioInterrupt(uint16_t gpio_pin)
     {
         Scope_RequestOffsetIncrease();
     }
+    else if (gpio_pin == K7_Pin)
+    {
+        Scope_ToggleWaveformHold();
+    }
     else if (gpio_pin == K8_Pin)
     {
         Scope_ToggleScaleTarget();
