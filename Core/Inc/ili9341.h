@@ -23,6 +23,8 @@
 #define ILI9341_GREEN   0x07E0
 #define ILI9341_WHITE   0xFFFF
 #define ILI9341_YELLOW  0xFFE0
+#define ILI9341_CYAN    0x07FF
+#define ILI9341_MAGENTA 0xF81F
 
 // 根据你接线修改这些宏
 #define LCD_CS_LOW()    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_RESET)
