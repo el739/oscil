@@ -29,6 +29,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
+#include <stdlib.h>
 #include "scope.h"
 #include "scope_buffer.h"
 #include "input_handler.h"
@@ -52,11 +53,20 @@
 
 /* USER CODE BEGIN PV */
 static uint16_t scope_frame_copy[SCOPE_FRAME_SAMPLES];
+static uint8_t uart_rx_byte = 0U;
+static char uart_rx_buffer[16];
+static char uart_cmd_buffer[16];
+static volatile uint8_t uart_line_ready = 0U;
+static uint8_t uart_rx_len = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+static uint32_t ComputeTim1ClockHz(void);
+static uint8_t ApplyWaveformFrequency(uint32_t target_hz);
+static void ProcessUartLine(void);
+static void SendUartText(const char *text);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -74,6 +84,39 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
         ScopeBuffer_EnqueueFromISR(0U);
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART3)
+    {
+        uint8_t byte = uart_rx_byte;
+        if (byte == '\r' || byte == '\n')
+        {
+            if (uart_rx_len > 0U && uart_line_ready == 0U)
+            {
+                uint8_t copy_len = uart_rx_len;
+                if (copy_len >= sizeof(uart_cmd_buffer))
+                {
+                    copy_len = (uint8_t)(sizeof(uart_cmd_buffer) - 1U);
+                }
+                memcpy(uart_cmd_buffer, uart_rx_buffer, copy_len);
+                uart_cmd_buffer[copy_len] = '\0';
+                uart_line_ready = 1U;
+            }
+            uart_rx_len = 0U;
+        }
+        else if (uart_rx_len < (sizeof(uart_rx_buffer) - 1U))
+        {
+            uart_rx_buffer[uart_rx_len++] = (char)byte;
+        }
+        else
+        {
+            uart_rx_len = 0U;
+        }
+
+        HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1U);
     }
 }
 /* USER CODE END 0 */
@@ -123,6 +166,7 @@ int main(void)
   HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ScopeBuffer_GetDmaBaseAddress(), dma_samples);
   HAL_TIM_Base_Start(&htim3);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_UART_Receive_IT(&huart3, &uart_rx_byte, 1U);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -145,6 +189,11 @@ int main(void)
                      (size_t)samples_to_process * sizeof(uint16_t));
               Scope_ProcessFrame(scope_frame_copy, samples_to_process);
           }
+      }
+      if (uart_line_ready != 0U)
+      {
+          uart_line_ready = 0U;
+          ProcessUartLine();
       }
     /* USER CODE END WHILE */
 
@@ -238,3 +287,119 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+/* USER CODE BEGIN 7 */
+static uint32_t ComputeTim1ClockHz(void)
+{
+    uint32_t tim_clk = HAL_RCC_GetPCLK2Freq();
+    if (tim_clk == 0U)
+    {
+        return 0U;
+    }
+
+    RCC_ClkInitTypeDef clk_config;
+    uint32_t flash_latency;
+    HAL_RCC_GetClockConfig(&clk_config, &flash_latency);
+    if (clk_config.APB2CLKDivider != RCC_HCLK_DIV1)
+    {
+        tim_clk *= 2U;
+    }
+
+    return tim_clk;
+}
+
+static uint8_t ApplyWaveformFrequency(uint32_t target_hz)
+{
+    if (target_hz == 0U)
+    {
+        return 0U;
+    }
+
+    uint32_t tim_clk = ComputeTim1ClockHz();
+    if (tim_clk == 0U)
+    {
+        return 0U;
+    }
+
+    uint32_t psc = 0U;
+    uint32_t arr_plus_one = tim_clk / target_hz;
+
+    while (arr_plus_one > 65536U)
+    {
+        psc++;
+        if (psc > 0xFFFFU)
+        {
+            return 0U;
+        }
+        arr_plus_one = tim_clk / (target_hz * (psc + 1U));
+    }
+
+    if (arr_plus_one == 0U)
+    {
+        return 0U;
+    }
+
+    uint32_t arr = arr_plus_one - 1U;
+    uint32_t pulse = (arr + 1U) / 2U;
+
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+    __HAL_TIM_SET_PRESCALER(&htim1, psc);
+    __HAL_TIM_SET_AUTORELOAD(&htim1, arr);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse);
+    HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
+    return 1U;
+}
+
+static void SendUartText(const char *text)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+    HAL_UART_Transmit(&huart3, (uint8_t *)text, strlen(text), 100U);
+}
+
+static void ProcessUartLine(void)
+{
+    char *line = uart_cmd_buffer;
+    if (line[0] == '\0')
+    {
+        return;
+    }
+
+    char *end_ptr;
+    while (*line == ' ' || *line == '\t')
+    {
+        line++;
+    }
+
+    unsigned long value = strtoul(line, &end_ptr, 10);
+    while (*end_ptr == ' ' || *end_ptr == '\t')
+    {
+        end_ptr++;
+    }
+
+    if (end_ptr == line || *end_ptr != '\0')
+    {
+        SendUartText("ERR\r\n");
+        return;
+    }
+
+    if (value == 0UL || value >= 50000UL)
+    {
+        SendUartText("ERR\r\n");
+        return;
+    }
+
+    if (ApplyWaveformFrequency((uint32_t)value) != 0U)
+    {
+        SendUartText("OK\r\n");
+    }
+    else
+    {
+        SendUartText("ERR\r\n");
+    }
+}
+/* USER CODE END 7 */
