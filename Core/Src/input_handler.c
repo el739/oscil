@@ -50,7 +50,11 @@ void InputHandler_ProcessGpioInterrupt(uint16_t gpio_pin)
     }
     else if (gpio_pin == K1_Pin)
     {
-        if (Scope_GetScaleTarget() == SCOPE_SCALE_TARGET_VOLTAGE)
+        if (Scope_IsWaveformHoldEnabled())
+        {
+            Scope_ToggleCursorAutoShift(-1);
+        }
+        else if (Scope_GetScaleTarget() == SCOPE_SCALE_TARGET_VOLTAGE)
         {
             Scope_RequestMoreVoltageScale();
         }
@@ -61,7 +65,11 @@ void InputHandler_ProcessGpioInterrupt(uint16_t gpio_pin)
     }
     else if (gpio_pin == K2_Pin)
     {
-        if (Scope_GetScaleTarget() == SCOPE_SCALE_TARGET_VOLTAGE)
+        if (Scope_IsWaveformHoldEnabled())
+        {
+            Scope_ToggleCursorAutoShift(1);
+        }
+        else if (Scope_GetScaleTarget() == SCOPE_SCALE_TARGET_VOLTAGE)
         {
             Scope_RequestLessVoltageScale();
         }

@@ -32,6 +32,7 @@ void Scope_ToggleWaveformHold(void);
 uint8_t Scope_IsWaveformHoldEnabled(void);
 void Scope_RequestCursorShift(int8_t direction);
 void Scope_RequestCursorSelectNext(void);
+void Scope_ToggleCursorAutoShift(int8_t direction);
 
 #ifdef __cplusplus
 }

@@ -11,7 +11,8 @@ enum
     VERTICAL_SCALE_MAX_FACTOR = 8U,
     OFFSET_STEP_DIVISOR = 10U,
     AUTOSET_MARGIN_PERCENT_NUMERATOR = 1U,
-    AUTOSET_MARGIN_PERCENT_DENOMINATOR = 5U
+    AUTOSET_MARGIN_PERCENT_DENOMINATOR = 5U,
+    CURSOR_AUTOSHIFT_INTERVAL_MS = 50U
 };
 
 typedef struct
@@ -70,6 +71,12 @@ typedef struct
     volatile uint8_t select_toggle_request;
 } ScopeCursorState;
 
+typedef struct
+{
+    volatile int8_t direction;
+    volatile uint32_t last_tick_ms;
+} ScopeCursorAutoShiftState;
+
 static ScopeDisplaySettings scope_display_settings;
 static ScopeControlFlags scope_control = {0};
 static ScopeScaleTarget scope_scale_target = SCOPE_SCALE_TARGET_VOLTAGE;
@@ -77,6 +84,7 @@ static volatile uint8_t scope_waveform_hold = 0U;
 static ScopeFrameSnapshot scope_live_frame = {0};
 static ScopeFrameSnapshot scope_hold_frame = {0};
 static ScopeCursorState scope_cursor_state = {0};
+static ScopeCursorAutoShiftState scope_cursor_autoshift = {0};
 static uint8_t scope_hold_render_pending = 0U;
 static void Scope_DisplaySettingsInit(void);
 static void Scope_ResetVerticalWindow(void);
@@ -101,6 +109,8 @@ static void Scope_SetHoldState(uint8_t enable);
 static uint8_t Scope_CopyLiveFrameToHold(void);
 static void Scope_DisableHoldState(void);
 static void Scope_InitCursorPositions(void);
+static void Scope_ResetCursorAutoShift(void);
+static void Scope_UpdateCursorAutoShift(void);
 static void Scope_ApplyCursorRequests(void);
 static void Scope_MoveCursor(uint8_t cursor_index, int8_t steps);
 static void Scope_RenderHoldFrame(void);
@@ -132,6 +142,7 @@ void Scope_Init(void)
 void Scope_ProcessFrame(uint16_t *samples, uint16_t count)
 {
     Scope_HandleHoldToggleRequest();
+    Scope_UpdateCursorAutoShift();
 
     if (samples == NULL || count == 0U)
     {
@@ -283,6 +294,34 @@ void Scope_ToggleWaveformHold(void)
 uint8_t Scope_IsWaveformHoldEnabled(void)
 {
     return scope_waveform_hold;
+}
+
+void Scope_ToggleCursorAutoShift(int8_t direction)
+{
+    if (direction == 0 || !Scope_IsWaveformHoldEnabled())
+    {
+        return;
+    }
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (!scope_waveform_hold)
+    {
+        Scope_ResetCursorAutoShift();
+    }
+    else if (scope_cursor_autoshift.direction == direction)
+    {
+        Scope_ResetCursorAutoShift();
+    }
+    else
+    {
+        scope_cursor_autoshift.direction = direction;
+        scope_cursor_autoshift.last_tick_ms = 0U;
+    }
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
 }
 
 void Scope_RequestCursorShift(int8_t direction)
@@ -829,6 +868,7 @@ static void Scope_SetHoldState(uint8_t enable)
         }
         scope_waveform_hold = 1U;
         Scope_InitCursorPositions();
+        Scope_ResetCursorAutoShift();
         scope_hold_render_pending = 1U;
     }
     else
@@ -866,6 +906,7 @@ static void Scope_DisableHoldState(void)
     scope_cursor_state.selected = 0U;
     scope_cursor_state.shift_requests = 0;
     scope_cursor_state.select_toggle_request = 0U;
+    Scope_ResetCursorAutoShift();
     scope_hold_render_pending = 0U;
 }
 
@@ -893,6 +934,66 @@ static void Scope_InitCursorPositions(void)
     scope_cursor_state.shift_requests = 0;
     scope_cursor_state.select_toggle_request = 0U;
     scope_cursor_state.active = 1U;
+}
+
+static void Scope_ResetCursorAutoShift(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    scope_cursor_autoshift.direction = 0;
+    scope_cursor_autoshift.last_tick_ms = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static void Scope_UpdateCursorAutoShift(void)
+{
+    int8_t direction = 0;
+    uint32_t last_tick = 0U;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    direction = scope_cursor_autoshift.direction;
+    last_tick = scope_cursor_autoshift.last_tick_ms;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    if (!scope_waveform_hold || !scope_hold_frame.valid || !scope_cursor_state.active)
+    {
+        Scope_ResetCursorAutoShift();
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+    if (last_tick == 0U || (now - last_tick) >= CURSOR_AUTOSHIFT_INTERVAL_MS)
+    {
+        primask = __get_PRIMASK();
+        __disable_irq();
+        if (scope_cursor_autoshift.direction == direction)
+        {
+            scope_cursor_autoshift.last_tick_ms = now;
+        }
+        else
+        {
+            direction = 0;
+        }
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+        if (direction != 0)
+        {
+            Scope_RequestCursorShift(direction);
+        }
+    }
 }
 
 static void Scope_ApplyCursorRequests(void)
