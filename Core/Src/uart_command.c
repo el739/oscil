@@ -109,6 +109,11 @@ static void ProcessUartLine(void)
         line++;
     }
 
+    if (*line == 's' || *line == 'S')
+    {
+        line++;
+    }
+
     unsigned long value = strtoul(line, &end_ptr, 10);
     while (*end_ptr == ' ' || *end_ptr == '\t')
     {
@@ -121,7 +126,7 @@ static void ProcessUartLine(void)
         return;
     }
 
-    if (value == 0UL || value >= 50000UL)
+    if (value < 1UL || value > 5000UL)
     {
         SendUartText("ERR\r\n");
         return;
