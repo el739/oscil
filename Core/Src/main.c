@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dac.h"
 #include "dma.h"
 #include "spi.h"
 #include "tim.h"
@@ -117,6 +118,8 @@ int main(void)
   MX_TIM3_Init();
   MX_SPI1_Init();
   MX_TIM1_Init();
+  MX_DAC_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   ScopeBuffer_Init();
   InputHandler_Init();
@@ -243,7 +246,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
-/* USER CODE BEGIN 7 */
-
-/* USER CODE END 7 */
