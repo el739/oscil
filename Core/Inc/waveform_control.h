@@ -28,6 +28,8 @@ extern "C" {
 #include <stdint.h>
 
 void WaveformControl_Init(void);
+uint8_t WaveformControl_SetSquareFrequency(uint32_t target_hz);
+uint8_t WaveformControl_SetSineFrequency(uint32_t target_hz);
 uint8_t WaveformControl_SetFrequency(uint32_t target_hz);
 
 #ifdef __cplusplus

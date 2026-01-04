@@ -109,9 +109,15 @@ static void ProcessUartLine(void)
         line++;
     }
 
+    uint8_t set_sine = 0U;
     if (*line == 's' || *line == 'S')
     {
+        set_sine = 1U;
         line++;
+        while (*line == ' ' || *line == '\t')
+        {
+            line++;
+        }
     }
 
     unsigned long value = strtoul(line, &end_ptr, 10);
@@ -126,13 +132,17 @@ static void ProcessUartLine(void)
         return;
     }
 
-    if (value < 1UL || value > 5000UL)
+    uint8_t ok = 0U;
+    if (set_sine != 0U)
     {
-        SendUartText("ERR\r\n");
-        return;
+        ok = WaveformControl_SetSineFrequency((uint32_t)value);
+    }
+    else
+    {
+        ok = WaveformControl_SetSquareFrequency((uint32_t)value);
     }
 
-    if (WaveformControl_SetFrequency((uint32_t)value) != 0U)
+    if (ok != 0U)
     {
         SendUartText("OK\r\n");
     }

@@ -22,10 +22,14 @@
 #include "tim.h"
 #include "main.h"
 
-#define SINE_SAMPLE_COUNT   (64U)
-#define SINE_MIN_FREQ_HZ    (1U)
-#define SINE_MAX_FREQ_HZ    (5000U)
-#define SINE_DEFAULT_FREQ_HZ (1000U)
+#define SINE_SAMPLE_COUNT     (64U)
+#define SINE_MIN_FREQ_HZ      (1U)
+#define SINE_MAX_FREQ_HZ      (5000U)
+#define SINE_DEFAULT_FREQ_HZ  (1000U)
+
+#define SQUARE_MIN_FREQ_HZ    (1U)
+#define SQUARE_MAX_FREQ_HZ    (50000U)
+#define SQUARE_DEFAULT_FREQ_HZ (1000U)
 
 static const uint16_t sine_lut[SINE_SAMPLE_COUNT] = {
     2048, 2249, 2447, 2642, 2831, 3013, 3185, 3347,
@@ -39,38 +43,113 @@ static const uint16_t sine_lut[SINE_SAMPLE_COUNT] = {
 };
 
 static uint8_t dac_started = 0U;
+static uint8_t square_started = 0U;
 
+static uint32_t ComputeTim1ClockHz(void);
 static uint32_t ComputeTim4ClockHz(void);
-static uint8_t ApplyWaveformFrequency(uint32_t target_hz);
+static void StartSineOutputIfNeeded(void);
+static void StartSquareOutputIfNeeded(void);
+static uint8_t ApplySquareFrequency(uint32_t target_hz);
+static uint8_t ApplySineFrequency(uint32_t target_hz);
 
 void WaveformControl_Init(void)
 {
-    if (dac_started == 0U)
-    {
-        /* Start DAC with DMA in circular mode; data transfers on TIM4 TRGO. */
-        if (HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t *)sine_lut, SINE_SAMPLE_COUNT, DAC_ALIGN_12B_R) != HAL_OK)
-        {
-            Error_Handler();
-        }
-        __HAL_TIM_SET_COUNTER(&htim4, 0U);
-        if (HAL_TIM_Base_Start(&htim4) != HAL_OK)
-        {
-            Error_Handler();
-        }
-        dac_started = 1U;
-    }
+    StartSquareOutputIfNeeded();
+    StartSineOutputIfNeeded();
 
-    (void)WaveformControl_SetFrequency(SINE_DEFAULT_FREQ_HZ);
+    if (WaveformControl_SetSquareFrequency(SQUARE_DEFAULT_FREQ_HZ) == 0U)
+    {
+        Error_Handler();
+    }
+    if (WaveformControl_SetSineFrequency(SINE_DEFAULT_FREQ_HZ) == 0U)
+    {
+        Error_Handler();
+    }
 }
 
-uint8_t WaveformControl_SetFrequency(uint32_t target_hz)
+uint8_t WaveformControl_SetSquareFrequency(uint32_t target_hz)
+{
+    if (target_hz < SQUARE_MIN_FREQ_HZ || target_hz > SQUARE_MAX_FREQ_HZ)
+    {
+        return 0U;
+    }
+
+    StartSquareOutputIfNeeded();
+
+    return ApplySquareFrequency(target_hz);
+}
+
+uint8_t WaveformControl_SetSineFrequency(uint32_t target_hz)
 {
     if (target_hz < SINE_MIN_FREQ_HZ || target_hz > SINE_MAX_FREQ_HZ)
     {
         return 0U;
     }
 
-    return ApplyWaveformFrequency(target_hz);
+    StartSineOutputIfNeeded();
+
+    return ApplySineFrequency(target_hz);
+}
+
+uint8_t WaveformControl_SetFrequency(uint32_t target_hz)
+{
+    return WaveformControl_SetSquareFrequency(target_hz);
+}
+
+static void StartSineOutputIfNeeded(void)
+{
+    if (dac_started != 0U)
+    {
+        return;
+    }
+
+    /* Start DAC with DMA in circular mode; data transfers on TIM4 TRGO. */
+    if (HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t *)sine_lut, SINE_SAMPLE_COUNT, DAC_ALIGN_12B_R) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    __HAL_TIM_SET_COUNTER(&htim4, 0U);
+    if (HAL_TIM_Base_Start(&htim4) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    dac_started = 1U;
+}
+
+static void StartSquareOutputIfNeeded(void)
+{
+    if (square_started != 0U)
+    {
+        return;
+    }
+
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    square_started = 1U;
+}
+
+static uint32_t ComputeTim1ClockHz(void)
+{
+    uint32_t tim_clk = HAL_RCC_GetPCLK2Freq();
+    if (tim_clk == 0U)
+    {
+        return 0U;
+    }
+
+    RCC_ClkInitTypeDef clk_config;
+    uint32_t flash_latency;
+    HAL_RCC_GetClockConfig(&clk_config, &flash_latency);
+    if (clk_config.APB2CLKDivider != RCC_HCLK_DIV1)
+    {
+        tim_clk *= 2U;
+    }
+
+    return tim_clk;
 }
 
 static uint32_t ComputeTim4ClockHz(void)
@@ -92,7 +171,41 @@ static uint32_t ComputeTim4ClockHz(void)
     return tim_clk;
 }
 
-static uint8_t ApplyWaveformFrequency(uint32_t target_hz)
+static uint8_t ApplySquareFrequency(uint32_t target_hz)
+{
+    uint32_t tim_clk = ComputeTim1ClockHz();
+    if (tim_clk == 0U)
+    {
+        return 0U;
+    }
+
+    uint32_t psc = 0U;
+    uint32_t arr_plus_one = tim_clk / target_hz;
+
+    while (arr_plus_one == 0U || arr_plus_one > 0x10000U)
+    {
+        psc++;
+        if (psc > 0xFFFFU)
+        {
+            return 0U;
+        }
+        arr_plus_one = tim_clk / (target_hz * (psc + 1U));
+    }
+
+    uint32_t arr = arr_plus_one - 1U;
+    uint32_t pulse = (arr + 1U) / 2U;
+
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+    __HAL_TIM_SET_PRESCALER(&htim1, psc);
+    __HAL_TIM_SET_AUTORELOAD(&htim1, arr);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse);
+    HAL_TIM_GenerateEvent(&htim1, TIM_EVENTSOURCE_UPDATE);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
+    return 1U;
+}
+
+static uint8_t ApplySineFrequency(uint32_t target_hz)
 {
     uint32_t tim_clk = ComputeTim4ClockHz();
     if (tim_clk == 0U)
